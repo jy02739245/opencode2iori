@@ -3,7 +3,6 @@ package gateway
 import (
 	_ "embed"
 	"encoding/json"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -110,13 +109,7 @@ func officialTool(protocol wire.Protocol, name string, v1 bool) map[string]any {
 			parameters = definition.Parameters
 		}
 	}
-	if v1 {
-		if name == "bash" {
-			description = v1BashDescription(description)
-		}
-	} else if name == "shell" {
-		description = v2ShellDescription(description)
-	}
+	description = hostToolDescription(name, description, v1)
 	switch protocol {
 	case wire.Chat:
 		function := map[string]any{
@@ -154,23 +147,23 @@ func officialToolset(protocol wire.Protocol, v1 bool) []any {
 	return tools
 }
 
-// v2ShellDescription renders the shell tool description for the host platform.
-// The 2.x client describes the shell it actually has, so a Windows host says
-// powershell where a Unix host says bash.
-func v2ShellDescription(base string) string {
-	if runtime.GOOS != "windows" {
-		return base
+// hostToolDescription rewrites the host-specific fragments of the official
+// bash (1.x) and shell (2.x) definitions. Both clients describe the machine
+// they run on — the OS, the login shell and the temp directory handed to the
+// agent — so a gateway that shipped the Linux wording would advertise a
+// different host than the client it claims to be.
+func hostToolDescription(name, description string, v1 bool) string {
+	switch {
+	case v1 && name == "bash":
+		description = strings.Replace(description,
+			"OS: linux, Shell: bash",
+			"OS: "+hostPlatform()+", Shell: "+hostShell(), 1)
+	case !v1 && name == "shell":
+		description = strings.Replace(description,
+			"on Linux using bash",
+			"on "+hostPlatformTitle()+" using "+hostShell(), 1)
 	}
-	return strings.Replace(base, "on Linux using bash", "on Windows using powershell", 1)
-}
-
-// v1BashDescription applies the same platform rewrite to the 1.x bash
-// definition, which states its OS and shell inline.
-func v1BashDescription(base string) string {
-	if runtime.GOOS != "windows" {
-		return base
-	}
-	return strings.Replace(base, "OS: linux, Shell: bash", "OS: windows, Shell: powershell", 1)
+	return strings.ReplaceAll(description, "`/tmp/opencode`", "`"+hostTempDir()+"`")
 }
 
 // renameAndCompleteTools makes the tool list read as an official CLI session:

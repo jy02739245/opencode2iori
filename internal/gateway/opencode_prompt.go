@@ -4,7 +4,6 @@ import (
 	_ "embed"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -43,11 +42,16 @@ Use the skill tool to load a skill when a task matches its description.
 var (
 	opencodeEnvOnce sync.Once
 	opencodeWorkDir string
+	opencodeRootDir string
+	opencodeInGit   bool
 )
 
 // opencodeEnvironment renders the <env> block the CLI puts after its base
-// prompt. The working directory is resolved once per process; a platform
-// without one falls back to the official container path.
+// prompt. The directory is resolved once per process; a platform without one
+// falls back to the official container path. The CLI reports the directory it
+// runs in, the root of the git worktree that contains it (or the filesystem
+// root when there is none) and whether that worktree exists, so the block never
+// contradicts the project header the gateway sends alongside it.
 func opencodeEnvironment(model string) string {
 	opencodeEnvOnce.Do(func() {
 		directory := ""
@@ -57,27 +61,60 @@ func opencodeEnvironment(model string) string {
 		if directory == "" || directory == "." {
 			directory = "/workspace"
 		}
+		// The CLI reports the real path, so a working directory reached
+		// through a symlink must not keep the link (macOS resolves /tmp to
+		// /private/tmp).
+		if resolved, err := filepath.EvalSymlinks(directory); err == nil && resolved != "" {
+			directory = resolved
+		}
 		opencodeWorkDir = directory
+		opencodeRootDir, opencodeInGit = worktreeRoot(directory)
 	})
 	apiModel := strings.TrimSpace(strings.TrimPrefix(model, "opencode/"))
 	if apiModel == "" {
 		apiModel = "unknown"
 	}
-	platform := runtime.GOOS
-	if platform == "windows" {
-		platform = "win32"
+	repo := "no"
+	if opencodeInGit {
+		repo = "yes"
 	}
 	return strings.Join([]string{
 		"You are powered by the model named " + apiModel + ". The exact model ID is opencode/" + apiModel,
 		"Here is some useful information about the environment you are running in:",
 		"<env>",
 		"  Working directory: " + opencodeWorkDir,
-		"  Workspace root folder: " + opencodeWorkDir,
-		"  Is directory a git repo: yes",
-		"  Platform: " + platform,
+		"  Workspace root folder: " + opencodeRootDir,
+		"  Is directory a git repo: " + repo,
+		"  Platform: " + hostPlatform(),
 		"  Today's date: " + time.Now().UTC().Format("Mon Jan 02 2006"),
 		"</env>",
 	}, "\n")
+}
+
+// worktreeRoot reports the root of the git worktree containing directory, or
+// the filesystem root when directory is not inside one. A worktree root is the
+// nearest ancestor carrying a .git entry, which is a directory in a ordinary
+// checkout and a file in a linked worktree.
+func worktreeRoot(directory string) (string, bool) {
+	for current := directory; ; {
+		if _, err := os.Lstat(filepath.Join(current, ".git")); err == nil {
+			return current, true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return workspaceRoot(directory), false
+		}
+		current = parent
+	}
+}
+
+// workspaceRoot is the root of the volume holding directory: "/" on Unix and
+// "C:\" on Windows, the value the CLI reports outside a git worktree.
+func workspaceRoot(directory string) string {
+	if volume := filepath.VolumeName(directory); volume != "" {
+		return volume + string(filepath.Separator)
+	}
+	return string(filepath.Separator)
 }
 
 // opencodeSystemPrompt assembles the full CLI system prompt for model and the
