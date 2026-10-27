@@ -23,6 +23,14 @@ The executable includes the WebUI. Running the service requires no Node.js runti
 
 See the [management console guide (Chinese)](docs/management.zh-CN.md) for the new pages and configuration.
 
+## Sponsors
+
+<a href="https://www.ipwo.net/?ref=githubopencode2api">
+  <img src="https://i.ibb.co/Jw4LdC8K/2.png" alt="IPWO" width="100%">
+</a>
+
+**Sponsored by [IPWO](https://www.ipwo.net/?ref=githubopencode2api)** — Flexible network connectivity for AI development and API workflows. IPWO residential proxies cover 195+ countries and regions, support HTTP(S)/SOCKS5, and are suitable for cross-region network testing, compliant data collection, and automation. Dynamic, static, and unlimited proxy plans are available, with free testing. Discount code: `0200`.
+
 ## Quick start
 
 Download a binary from [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases), or build with **Go 1.24 or newer**:
@@ -568,3 +576,4 @@ Observations are persisted by upstream URL, model and native protocol, displayed
 SPDX-License-Identifier: GPL-3.0-or-later
 
 This project is free software: you may redistribute and modify it under the GNU General Public License as published by the Free Software Foundation, either version 3 or (at your option) any later version. It is distributed without any warranty. See [LICENSE](LICENSE) for the full terms.
+

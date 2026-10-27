@@ -23,6 +23,14 @@ L'eseguibile include la WebUI: per eseguire il servizio non servono Node.js né 
 
 Consulta la [guida della console di gestione (in cinese)](docs/management.zh-CN.md) per informazioni sulle nuove pagine e sulla configurazione.
 
+## Sponsor
+
+<a href="https://www.ipwo.net/?ref=githubopencode2api">
+  <img src="https://i.imgur.com/J8qlKgB.jpeg" alt="IPWO" width="140">
+</a>
+
+**Sponsorizzato da [IPWO](https://www.ipwo.net/?ref=githubopencode2api)** — Connettività di rete flessibile per lo sviluppo di AI e workflow API. I proxy residenziali IPWO coprono oltre 195 paesi e regioni, supportano HTTP(S)/SOCKS5 e sono adatti a test di rete cross-region, raccolta dati conforme e automazione. Sono disponibili piani proxy dinamici, statici e illimitati, con test gratuito. Codice sconto: `0200`.
+
 ## Avvio rapido
 
 Scarica un binario da [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases) oppure compila con **Go 1.24 o superiore**:

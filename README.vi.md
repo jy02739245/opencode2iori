@@ -25,6 +25,14 @@ Giao diện quản trị hỗ trợ **简体中文** (mặc định), **English*
 
 Xem [hướng dẫn bảng điều khiển quản trị (tiếng Trung)](docs/management.zh-CN.md) để biết các trang mới và tuỳ chọn cấu hình.
 
+## Nhà tài trợ
+
+<a href="https://www.ipwo.net/?ref=githubopencode2api">
+  <img src="https://i.imgur.com/J8qlKgB.jpeg" alt="IPWO" width="140">
+</a>
+
+**Được tài trợ bởi [IPWO](https://www.ipwo.net/?ref=githubopencode2api)** — Hỗ trợ kết nối mạng linh hoạt cho phát triển AI và quy trình API. Proxy dân cư IPWO bao phủ hơn 195 quốc gia và khu vực, hỗ trợ HTTP(S)/SOCKS5, phù hợp cho kiểm thử mạng xuyên khu vực, thu thập dữ liệu tuân thủ và tự động hóa. Có gói proxy động, tĩnh và không giới hạn, hỗ trợ dùng thử miễn phí. Mã giảm giá: `0200`.
+
 ## Bắt đầu nhanh
 
 Tải file nhị phân từ [GitHub Releases](https://github.com/jasonxu114514/opencode2api/releases), hoặc build với **Go 1.24 trở lên**:
