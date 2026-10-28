@@ -23,13 +23,23 @@ var opencodePromptV1 string
 //go:embed opencode_prompt_v2.txt
 var opencodePromptV2 string
 
-// opencodePromptMarker identifies a body that already carries the official CLI
-// system prompt, so a client that sends it itself is left alone.
-const opencodePromptMarker = "You are opencode, an interactive CLI tool"
+//go:embed opencode_skills_v2.txt
+var opencodeSkillsV2 string
 
-// opencodeSkills is the built-in skill listing the CLI appends after its
-// environment block. It is static, so it is part of the injected prompt.
-const opencodeSkills = `Skills provide specialized instructions and workflows for specific tasks.
+// opencodePromptMarker identifies a body that already carries the official CLI
+// system prompt, so a client that sends it itself is left alone. The two
+// generations open differently: 1.x with "You are opencode, an interactive CLI
+// tool", 2.x with "You are an AI agent running in OpenCode".
+const (
+	opencodePromptMarker   = "You are opencode, an interactive CLI tool"
+	opencodePromptMarkerV2 = "You are an AI agent running in OpenCode"
+)
+
+// opencodeSkillsV1 is the 1.x built-in skill listing the CLI appends after its
+// environment block. It is static, so it is part of the injected prompt. The
+// 2.x client lists different skills and puts the block before the environment,
+// so its listing lives in opencode_skills_v2.txt.
+const opencodeSkillsV1 = `Skills provide specialized instructions and workflows for specific tasks.
 Use the skill tool to load a skill when a task matches its description.
 <available_skills>
   <skill>
@@ -52,31 +62,11 @@ var (
 // runs in, the root of the git worktree that contains it (or the filesystem
 // root when there is none) and whether that worktree exists, so the block never
 // contradicts the project header the gateway sends alongside it.
-func opencodeEnvironment(model string) string {
-	opencodeEnvOnce.Do(func() {
-		directory := ""
-		if current, err := os.Getwd(); err == nil {
-			directory = filepath.Clean(strings.TrimSpace(current))
-		}
-		if directory == "" || directory == "." {
-			directory = "/workspace"
-		}
-		// The CLI reports the real path, so a working directory reached
-		// through a symlink must not keep the link (macOS resolves /tmp to
-		// /private/tmp).
-		if resolved, err := filepath.EvalSymlinks(directory); err == nil && resolved != "" {
-			directory = resolved
-		}
-		opencodeWorkDir = directory
-		opencodeRootDir, opencodeInGit = worktreeRoot(directory)
-	})
+func opencodeEnvironmentV1(model string) string {
+	opencodeEnvOnce.Do(resolveHostPaths)
 	apiModel := strings.TrimSpace(strings.TrimPrefix(model, "opencode/"))
 	if apiModel == "" {
 		apiModel = "unknown"
-	}
-	repo := "no"
-	if opencodeInGit {
-		repo = "yes"
 	}
 	return strings.Join([]string{
 		"You are powered by the model named " + apiModel + ". The exact model ID is opencode/" + apiModel,
@@ -84,11 +74,63 @@ func opencodeEnvironment(model string) string {
 		"<env>",
 		"  Working directory: " + opencodeWorkDir,
 		"  Workspace root folder: " + opencodeRootDir,
-		"  Is directory a git repo: " + repo,
+		"  Is directory a git repo: " + repoFlag(),
 		"  Platform: " + hostPlatform(),
-		"  Today's date: " + time.Now().UTC().Format("Mon Jan 02 2006"),
+		"  Today's date: " + today(),
 		"</env>",
 	}, "\n")
+}
+
+// opencodeEnvironmentV2 renders the 2.2 client's environment tail. It differs
+// from 1.x in three ways: the date stands on its own before the block, the
+// block names the temp directory the client pre-created instead of the date,
+// and a note about moving the session to a worktree follows it. The 2.x client
+// also names no model, because its skills listing already precedes this text.
+func opencodeEnvironmentV2() string {
+	opencodeEnvOnce.Do(resolveHostPaths)
+	return "\nToday's date: " + today() +
+		"\n\nHere is some useful information about the environment you are running in:\n<env>\n" +
+		"  Working directory: " + opencodeWorkDir + "\n" +
+		"  Workspace root folder: " + opencodeRootDir + "\n" +
+		"  Is directory a git repo: " + repoFlag() + "\n" +
+		"  Platform: " + hostPlatform() + "\n" +
+		"  Prefer " + hostTempDir() + " over generic system temporary directories such as /tmp; it is pre-created and approved for external access.\n" +
+		"</env>\n" +
+		"When you create a worktree outside the current working directory and intend to use it as your primary working directory, consider using `execute` to call `tools.opencode.session_move` and make the worktree the session's working directory."
+}
+
+// resolveHostPaths resolves the working directory, its git worktree root and
+// the repository flag once per process.
+func resolveHostPaths() {
+	directory := ""
+	if current, err := os.Getwd(); err == nil {
+		directory = filepath.Clean(strings.TrimSpace(current))
+	}
+	if directory == "" || directory == "." {
+		directory = "/workspace"
+	}
+	// The CLI reports the real path, so a working directory reached through a
+	// symlink must not keep the link (macOS resolves /tmp to /private/tmp).
+	if resolved, err := filepath.EvalSymlinks(directory); err == nil && resolved != "" {
+		directory = resolved
+	}
+	opencodeWorkDir = directory
+	opencodeRootDir, opencodeInGit = worktreeRoot(directory)
+}
+
+// repoFlag is the value of the environment block's repository line.
+func repoFlag() string {
+	if opencodeInGit {
+		return "yes"
+	}
+	return "no"
+}
+
+// today is the date both generations print. The CLI uses the host's local date,
+// not UTC: a capture under TZ=Pacific/Kiritimati reported the next day while UTC
+// still named the previous one.
+func today() string {
+	return time.Now().Format("Mon Jan 02 2006")
 }
 
 // worktreeRoot reports the root of the git worktree containing directory, or
@@ -118,13 +160,15 @@ func workspaceRoot(directory string) string {
 }
 
 // opencodeSystemPrompt assembles the full CLI system prompt for model and the
-// upstream generation's tool naming.
+// upstream generation's tool naming. The generations order their parts
+// differently: 1.x puts the model line and environment block before the skills
+// listing, while 2.x lists the skills first and then the date, the environment
+// and the worktree note.
 func opencodeSystemPrompt(model string, v1 bool) string {
-	base := opencodePromptV2
 	if v1 {
-		base = opencodePromptV1
+		return opencodePromptV1 + opencodeEnvironmentV1(model) + "\n" + opencodeSkillsV1
 	}
-	return base + opencodeEnvironment(model) + "\n" + opencodeSkills
+	return opencodePromptV2 + opencodeSkillsV2 + opencodeEnvironmentV2()
 }
 
 // injectOfficialPrompt prepends the official CLI system prompt to a shaped
@@ -263,7 +307,7 @@ func textFragments(value any) []string {
 // the marker.
 func carriesOpenCodePrompt(value any) bool {
 	for _, part := range textFragments(value) {
-		if strings.Contains(part, opencodePromptMarker) {
+		if strings.Contains(part, opencodePromptMarker) || strings.Contains(part, opencodePromptMarkerV2) {
 			return true
 		}
 	}

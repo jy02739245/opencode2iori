@@ -32,8 +32,8 @@ type opencodeToolDefinition struct {
 // because Go maps do not preserve it. Tool order is not validated upstream, but
 // keeping the captured order makes the wire body stable.
 var v2OfficialToolOrder = []string{
-	"edit", "execute", "glob", "grep", "question", "read", "shell",
-	"skill", "subagent", "webfetch", "websearch", "write", "patch",
+	"edit", "glob", "grep", "question", "read", "shell", "skill",
+	"subagent", "webfetch", "websearch", "write", "execute",
 }
 
 var (
