@@ -26,6 +26,9 @@ func PrepareRequest(from, to Protocol, input map[string]any, upstreamURL string)
 		jsonutil.Put(output, "max_output_tokens", floorResponsesMaxTokens(output["max_output_tokens"]))
 	}
 	normalizeToolReasoningHistory(to, jsonutil.StringAt(output, "model"), upstreamURL, output)
+	if to == Chat {
+		normalizeChatToolCallContent(output)
+	}
 	return output, nil
 }
 
@@ -258,6 +261,31 @@ func requestEnablesReasoning(input map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// normalizeChatToolCallContent gives every assistant tool-call turn an explicit
+// content, the shape the official client sends: a tool-call turn carries
+// "content": null rather than omitting the field. Clients built on other SDKs
+// omit it, which leaves a message the official client never sends in a body the
+// free tier fingerprints. It reports whether any message changed.
+func normalizeChatToolCallContent(input map[string]any) bool {
+	messages, ok := input["messages"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, rawMessage := range messages {
+		message, ok := rawMessage.(map[string]any)
+		if !ok || jsonutil.StringAt(message, "role") != "assistant" || len(jsonutil.SliceAt(message, "tool_calls")) == 0 {
+			continue
+		}
+		if _, exists := message["content"]; exists {
+			continue
+		}
+		message["content"] = nil
+		changed = true
+	}
+	return changed
 }
 
 // normalizeChatToolReasoningHistory ensures every assistant tool-call turn
