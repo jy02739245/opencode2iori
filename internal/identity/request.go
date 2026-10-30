@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"net/http"
 	"regexp"
+	"strconv"
 	"time"
 
 	"opencode2api/internal/jsonutil"
@@ -254,6 +255,21 @@ func CanonicalSessionID(signal string) string {
 	timePart := descendingTimePart(time.Now(), sum[:6])
 	randomPart := base62Fixed(new(big.Int).SetBytes(sum[6:16]), 14)
 	return "ses_" + timePart + randomPart
+}
+
+// RetrySession returns the session a retry of one request must present after
+// an upstream 429. The free tier charges a refusal to the session as well as to
+// the egress: replaying a refused session on another exit repeats the refusal
+// even when that exit still has quota, while a fresh session passes. A retry
+// therefore presents a session derived from the original one, a salt that is
+// unique per request, and the attempt number: two retries never present the
+// same session, so a session some earlier request already burned cannot come
+// back. The result passes the same encoding checks as CanonicalSessionID.
+func RetrySession(session, salt string, attempt int) string {
+	if session == "" {
+		return ""
+	}
+	return CanonicalSessionID(session + "\x00retry\x00" + salt + "\x00" + strconv.Itoa(attempt))
 }
 
 // isOfficialSessionID reports whether signal is a session minted by the

@@ -399,6 +399,9 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 	for i, baseURL := range upstreams {
 		preparedBodies[i], toolRenames[i] = prepareAnonymousBody(rawBody, protocol, models.IsV1Upstream(baseURL))
 	}
+	// The gate charges a 429 to the session as well as to the egress, so every
+	// attempt after one re-presents a derived session (see retrySessionIDs).
+	attemptIDs := ids
 	for proxies < limit {
 		if ctx.Err() != nil {
 			// The request-level budget is already gone. Stop scanning instead
@@ -438,7 +441,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				httpx.DrainAndClose(lastResponse.Body)
 				lastResponse = nil
 			}
-			req, err := upstreamRequest(ctx, baseURL, protocol, preparedBodies[index], ids, anonymousZenKey)
+			req, err := upstreamRequest(ctx, baseURL, protocol, preparedBodies[index], attemptIDs, anonymousZenKey)
 			if err != nil {
 				return nil, err, attempts
 			}
@@ -493,6 +496,13 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 				break
 			} else {
 				g.logger.Debug("anonymous upstream returned an error response; trying the next upstream or proxy", "component", "upstream", "event", "anonymous_attempt_response_failed", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "upstream", config.RedactURL(baseURL), "key_id", "anonymous", "channel", "anonymous", "anonymous", true, "proxy", config.RedactURL(node.proxy.name), "status", resp.StatusCode, "duration_ms", duration.Milliseconds())
+				if resp.StatusCode == http.StatusTooManyRequests {
+					// A 429 follows the session onto the next exit, so the retry
+					// presents a session derived from this attempt instead of
+					// replaying the refused one.
+					attemptIDs = retrySessionIDs(ids, attempts)
+					g.logger.Debug("retrying an anonymous 429 under a derived session", "component", "upstream", "event", "anonymous_attempt_session_retry", "request_id", ids.Request, "attempt", attempts, "tier", config.TierZen, "session", attemptIDs.Session)
+				}
 			}
 			if index+1 < len(upstreams) && !node.proxy.healthy.Load() {
 				break
@@ -552,6 +562,24 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 }
 
 // anonymousUpstreams returns the ordered base URLs for the keyless free tier.
+// retrySessionIDs returns the identity an anonymous retry must present after a
+// 429. The free tier charges the refusal to the session too, so replaying the
+// same session on another exit repeats it even when that exit has quota; the
+// retry therefore carries a session derived from the original one and the
+// attempt number. Project, message id and the gateway's own request id stay, so
+// the caller keeps its conversation affinity and telemetry still points at the
+// original session.
+func retrySessionIDs(ids identity.RequestIDs, attempt int) identity.RequestIDs {
+	ids.Session = identity.RetrySession(ids.Session, ids.Request, attempt)
+	if ids.ChildSession != "" {
+		ids.ChildSession = identity.RetrySession(ids.ChildSession, ids.Request, attempt)
+	}
+	if ids.ParentSession != "" {
+		ids.ParentSession = identity.RetrySession(ids.ParentSession, ids.Request, attempt)
+	}
+	return ids
+}
+
 // Only the v2 /inference origin is used: the 1.x /zen lane was retired for free
 // models, so the v1 fallback is commented out rather than called. The code is
 // kept for a revert; uncommenting the two lines marked below restores the old
