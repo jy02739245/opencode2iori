@@ -1,10 +1,11 @@
 package httpx
 
 // v2ClientVersion is the OpenCode 2.x CLI release the gateway claims to be on
-// the v2 lanes (/inference and /zen/go), and the version whose prompt, tool set
-// and <env> block the v2 assets carry. Upstream accepted 2.1.1 after 2.2.0
-// shipped, but the shape is bumped with the release it was captured from.
-const v2ClientVersion = "2.2.0"
+// the v2 lanes (/inference and /zen/go). The prompt, tool set and <env> block
+// shipped in opencode_prompt_v2.txt and opencode_tools.json were captured from
+// 2.2.0 and did not change in the following patch releases, so only the claimed
+// version tracks the current 2.x CLI.
+const v2ClientVersion = "2.2.4"
 
 // v1ClientVersion is the OpenCode 1.x release the gateway claims to be on the
 // v1 lane (/zen), and v1BunVersion is the Bun runtime that release ships with.
