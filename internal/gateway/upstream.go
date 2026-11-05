@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1285,11 +1286,12 @@ func setV1Headers(header http.Header, protocol wire.Protocol, body []byte, ids i
 // fingerprint: the "opencode/<channel>/<version>/cli" User-Agent, the
 // client's child session as x-opencode-session-id, the conversation affinity
 // (the canonical parent when one is present) as x-opencode-session,
-// x-session-affinity and X-Session-Id, and a bare 40-character hex
-// x-opencode-project. The v2 gate rejects x-opencode-request and canonical
-// prj_* project ids with 403 FreeTierError, so neither is sent. Anthropic
-// requests carry a fixed anthropic-beta set; upstreamRequest adds
-// anthropic-version and the beta query.
+// x-session-affinity and X-Session-Id, a bare 40-character hex
+// x-opencode-project, and the trace context every 2.x request carries. The v2
+// gate rejects x-opencode-request and canonical prj_* project ids with 403
+// FreeTierError, so neither is sent. Anthropic requests carry a fixed
+// anthropic-beta set; upstreamRequest adds anthropic-version and the beta
+// query.
 func setV2Headers(header http.Header, protocol wire.Protocol, ids identity.RequestIDs) {
 	header.Set("x-opencode-client", "cli")
 	rootSession := ids.Session
@@ -1309,9 +1311,28 @@ func setV2Headers(header http.Header, protocol wire.Protocol, ids identity.Reque
 	header.Set("x-opencode-session-id", childSession)
 	header.Set("User-Agent", httpx.V2UserAgent())
 	header.Set("x-opencode-project", projectID(ids.Project))
+	setTraceHeaders(header)
 	if protocol == wire.Anthropic {
 		header.Set("anthropic-beta", "interleaved-thinking-2025-05-14")
 	}
+}
+
+// setTraceHeaders adds the trace context the 2.x CLI attaches to every model
+// request: traceparent carries one span id, and its B3 single-header companion
+// repeats that span as the span and a second id as the parent, which is the
+// layout the CLI emits. Ids are random per request, as the client's are per
+// span, so the two headers never disagree about a trace the gateway does not
+// actually have.
+func setTraceHeaders(header http.Header) {
+	buf := make([]byte, 16+8+8)
+	if _, err := rand.Read(buf); err != nil {
+		return
+	}
+	traceID := hex.EncodeToString(buf[:16])
+	spanID := hex.EncodeToString(buf[16:24])
+	parentID := hex.EncodeToString(buf[24:])
+	header.Set("traceparent", "00-"+traceID+"-"+spanID+"-01")
+	header.Set("b3", traceID+"-"+spanID+"-1-"+parentID)
 }
 
 // v1ProviderUtils names the provider-utils version of the AI SDK package the

@@ -46,9 +46,17 @@ var hostShell = sync.OnceValue(func() string {
 })
 
 // hostTempDir is the directory the official CLI offers for work outside the
-// workspace: the process temp directory plus "opencode".
+// workspace: the process temp directory plus "opencode". The 2.x client names
+// it in its <env> block and the path rule below rewrites to the same value
+// inside its shell tool description. The client reports the resolved path, so a
+// temporary directory reached through a symlink (macOS /var → /private/var)
+// must not keep the link.
 func hostTempDir() string {
-	return filepath.Join(os.TempDir(), "opencode")
+	base := os.TempDir()
+	if resolved, err := filepath.EvalSymlinks(base); err == nil && resolved != "" {
+		base = resolved
+	}
+	return filepath.Join(base, "opencode")
 }
 
 // hostPlatformTitle is the display name the 2.x client uses in its shell tool
