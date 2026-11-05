@@ -23,9 +23,8 @@ import (
 // http.DefaultTransport.
 const bunHandshakeTimeout = 10 * time.Second
 
-// bunClientHello returns the ClientHello of Bun's fetch, captured from Bun
-// 1.4.3. Bun links its own BoringSSL, so the hello is the same on every
-// platform: JA4 t13d1713h1, no GREASE, no padding, http/1.1 as the only ALPN
+// bunClientHello returns the ClientHello captured from OpenCode 2.2.5's Bun
+// fetch: JA4 t13d1713h1, no GREASE, no padding, http/1.1 as the only ALPN
 // protocol and X25519MLKEM768 as the first key share. uTLS keeps handshake
 // state in the extensions, so every connection needs a fresh spec.
 func bunClientHello() *utls.ClientHelloSpec {
@@ -70,6 +69,8 @@ func bunClientHello() *utls.ClientHelloSpec {
 				utls.PKCS1WithSHA384,
 				utls.PSSWithSHA512,
 				utls.PKCS1WithSHA512,
+				utls.Ed25519,
+				utls.ECDSAWithP521AndSHA512,
 				utls.PKCS1WithSHA1,
 			}},
 			&utls.SCTExtension{},

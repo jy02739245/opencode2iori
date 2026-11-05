@@ -193,9 +193,11 @@ func hostToolDescription(name, description string, v1 bool) string {
 			"OS: linux, Shell: bash",
 			"OS: "+hostPlatform()+", Shell: "+hostShell(), 1)
 	case !v1 && name == "shell":
-		description = strings.Replace(description,
-			"on Linux using bash",
-			"on "+hostPlatformTitle()+" using "+hostShell(), 1)
+		if prefix, rest, ok := strings.Cut(description, "Commands run on "); ok {
+			if _, tail, ok := strings.Cut(rest, "."); ok {
+				description = prefix + "Commands run on " + hostPlatformTitle() + " using " + hostShell() + "." + tail
+			}
+		}
 	}
 	return strings.ReplaceAll(description, "`/tmp/opencode`", "`"+hostTempDir()+"`")
 }

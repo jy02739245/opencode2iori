@@ -64,6 +64,10 @@ var (
 // contradicts the project header the gateway sends alongside it.
 func opencodeEnvironmentV1(model string) string {
 	opencodeEnvOnce.Do(resolveHostPaths)
+	root := opencodeRootDir
+	if !opencodeInGit {
+		root = workspaceRoot(opencodeWorkDir)
+	}
 	apiModel := strings.TrimSpace(strings.TrimPrefix(model, "opencode/"))
 	if apiModel == "" {
 		apiModel = "unknown"
@@ -73,7 +77,7 @@ func opencodeEnvironmentV1(model string) string {
 		"Here is some useful information about the environment you are running in:",
 		"<env>",
 		"  Working directory: " + opencodeWorkDir,
-		"  Workspace root folder: " + opencodeRootDir,
+		"  Workspace root folder: " + root,
 		"  Is directory a git repo: " + repoFlag(),
 		"  Platform: " + hostPlatform(),
 		"  Today's date: " + today(),
@@ -134,8 +138,8 @@ func today() string {
 }
 
 // worktreeRoot reports the root of the git worktree containing directory, or
-// the filesystem root when directory is not inside one. A worktree root is the
-// nearest ancestor carrying a .git entry, which is a directory in a ordinary
+// directory itself when it is not inside one, as the v2 client does. A worktree
+// root is the nearest ancestor carrying a .git entry, a directory in an ordinary
 // checkout and a file in a linked worktree.
 func worktreeRoot(directory string) (string, bool) {
 	for current := directory; ; {
@@ -144,14 +148,14 @@ func worktreeRoot(directory string) (string, bool) {
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return workspaceRoot(directory), false
+			return directory, false
 		}
 		current = parent
 	}
 }
 
 // workspaceRoot is the root of the volume holding directory: "/" on Unix and
-// "C:\" on Windows, the value the CLI reports outside a git worktree.
+// "C:\" on Windows, the value the v1 CLI reports outside a git worktree.
 func workspaceRoot(directory string) string {
 	if volume := filepath.VolumeName(directory); volume != "" {
 		return volume + string(filepath.Separator)
