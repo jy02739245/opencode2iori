@@ -266,6 +266,12 @@ On every shaped free-model request the gateway replaces each named client tool w
 
 Responses are restored to client-declared names in streaming and non-streaming replies, including Chat tool names split across chunks. An official name is mapped when the client declared an equivalent tool; otherwise it remains unchanged in the response. In request history, unknown tool calls and official calls without a declared equivalent are removed with their paired results, and a named `tool_choice` targeting one of those dropped calls is removed too.
 
+### Text tool calls
+
+A model can write a tool call as markup inside the assistant text instead of in a structured `tool_calls` field. DeepSeek's DSML dialect is the common case: a `<|DSML| tool_calls>` wrapper holding `<|DSML| invoke name="…">` elements with `<|DSML| parameter name="…">` children. Forwarded verbatim, the block reaches the client as ordinary text, the upstream reports a normal stop, and the turn ends with no tool ever running.
+
+The gateway recovers those blocks on every message path — same-protocol Chat streams, transcoded Chat/Responses/Anthropic streams, collapsed non-streaming replies and rotation groups. The markup is removed from the visible text, each invoke becomes a real tool call whose arguments are one JSON object, and the turn reports a tool stop. A parameter whose value is already JSON keeps it; every other value is quoted as a string. Blocks that never close, and blocks that name no call, are passed through as text so a truncated answer loses nothing.
+
 ### Free model availability
 
 The gateway probes models whose IDs contain `free` (case-insensitive), or whose metadata reports zero input/output cost without deprecation, with a short request using its native protocol. It tries the enabled anonymous lane first and then one configured Zen Key. With `warp.enabled`, every probe lane leaves through WARP instead of a proxy; when no exit can be acquired the probe reports `warp_unavailable` and stays inconclusive. A valid completed response on either lane keeps the model enabled; the model is disabled in discovery and routing only when every attempted lane explicitly reports that the model does not exist or has been retired. Authentication errors, rate limits, timeouts, transport errors, 5xx responses, and malformed replies are inconclusive: they do not create a new disable, and are checked again in one hour. Probe traffic does not alter production key/proxy cooldowns or request statistics. It still reaches the upstream and may consume its free allowance.

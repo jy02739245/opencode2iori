@@ -86,6 +86,7 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 		responseReasoning: map[string]bool{},
 	}
 	emitter := bridgeStreamEmitter(w, flusher, to, model)
+	textTools := &textToolFilter{}
 	termination := streamOpen
 	readErr := readSSE(reader, func(eventName, data string) error {
 		events, err := parser.Parse(eventName, data)
@@ -96,7 +97,7 @@ func TranscodeStream(ctx context.Context, w http.ResponseWriter, reader io.Reade
 			}
 			return errStreamUpstreamFailure
 		}
-		for _, event := range events {
+		for _, event := range textTools.PushAll(events) {
 			switch event.Kind {
 			case "done":
 				termination = streamNormalTermination

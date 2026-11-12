@@ -63,6 +63,7 @@ func RotationStream(ctx context.Context, w http.ResponseWriter, reader io.Reader
 	}
 	parser := streamUsageObserver(from).parser
 	emitter := bridgeStreamEmitter(w, flusher, to, alias)
+	textTools := &textToolFilter{}
 	pending := []bridgeStreamEvent{}
 	var upstreamFailure error
 	emit := func(event bridgeStreamEvent) error {
@@ -80,7 +81,7 @@ func RotationStream(ctx context.Context, w http.ResponseWriter, reader io.Reader
 		if err != nil {
 			return &StreamFailure{Type: "parse_error"}
 		}
-		for _, event := range events {
+		for _, event := range textTools.PushAll(events) {
 			if event.Kind == "error" {
 				upstreamFailure = &StreamFailure{event.Error, event.ErrorType}
 				return upstreamFailure

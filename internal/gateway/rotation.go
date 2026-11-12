@@ -342,6 +342,9 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 	if shaped {
 		b, err = wire.CollapseStream(bytes.NewReader(b), route.Protocol, route.ID)
 	}
+	if err == nil && route.Protocol == wire.Chat {
+		b = wire.ExtractChatTextToolCalls(b)
+	}
 	if err == nil {
 		b = wire.RenameResponseTool(b, route.Protocol, toolRenames)
 	}

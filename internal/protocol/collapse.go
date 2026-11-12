@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"opencode2api/internal/identity"
 )
 
 // CollapseStream consumes one complete upstream SSE stream and synthesizes
@@ -27,6 +29,7 @@ func CollapseStream(reader io.Reader, protocol Protocol, model string) ([]byte, 
 		responseReasoning: map[string]bool{},
 	}
 	acc := &collapseAccumulator{tools: map[string]int{}}
+	textTools := &textToolFilter{}
 	acc.response.Created = time.Now().Unix()
 	acc.response.Model = model
 	terminated := false
@@ -37,7 +40,7 @@ func CollapseStream(reader io.Reader, protocol Protocol, model string) ([]byte, 
 			streamErr = err
 			return errStreamUpstreamFailure
 		}
-		for _, event := range events {
+		for _, event := range textTools.PushAll(events) {
 			switch event.Kind {
 			case "done":
 				terminated = true
@@ -133,19 +136,21 @@ func (acc *collapseAccumulator) splitReasoning() {
 }
 
 // toolBlock returns the tool call for a stream tool key, appending it on first
-// sight and filling in an ID or name that earlier events lacked.
+// sight and filling in an ID or name that earlier events lacked. A call that
+// arrived without an ID gets one, because both Chat and Responses clients pair
+// the result with the call by that ID.
 func (acc *collapseAccumulator) toolBlock(key, id, name string) *bridgeBlock {
 	if index, ok := acc.tools[key]; ok {
 		block := &acc.response.Tools[index]
 		if block.ID == "" {
-			block.ID = id
+			block.ID = firstNonEmpty(id, identity.RandomID("call", 12))
 		}
 		if block.Name == "" {
 			block.Name = name
 		}
 		return block
 	}
-	acc.response.Tools = append(acc.response.Tools, bridgeBlock{Kind: "tool_call", ID: id, Name: name})
+	acc.response.Tools = append(acc.response.Tools, bridgeBlock{Kind: "tool_call", ID: firstNonEmpty(id, identity.RandomID("call", 12)), Name: name})
 	acc.tools[key] = len(acc.response.Tools) - 1
 	return &acc.response.Tools[len(acc.response.Tools)-1]
 }

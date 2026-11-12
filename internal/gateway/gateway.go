@@ -250,6 +250,15 @@ func requestShapeFrom(ctx context.Context) requestShape {
 	return requestShape{}
 }
 
+// requestDeclaresTools reports whether the client sent a tool list, in either
+// the modern tools array or the legacy functions array.
+func requestDeclaresTools(payload map[string]any) bool {
+	if len(jsonutil.SliceAt(payload, "tools")) > 0 {
+		return true
+	}
+	return len(jsonutil.SliceAt(payload, "functions")) > 0
+}
+
 func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(context.WithValue(r.Context(), requestShapeContextKey{}, &requestShape{}))
@@ -423,7 +432,15 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-Accel-Buffering", "no")
 			w.WriteHeader(resp.StatusCode)
-			streamBody := wire.RenameStreamReader(resp.Body, upstreamRoute.Protocol, toolRenames)
+			var streamReader io.Reader = resp.Body
+			if upstreamRoute.Anonymous || shape.shaped || requestDeclaresTools(payload) {
+				// A chat upstream can answer with a DSML tool call in the text
+				// stream; turn it into tool_calls frames before the client sees
+				// it. Without tools the model has nothing to call, so the
+				// stream is forwarded untouched.
+				streamReader = wire.TextToolStreamReader(streamReader, upstreamRoute.Protocol)
+			}
+			streamBody := wire.RenameStreamReader(streamReader, upstreamRoute.Protocol, toolRenames)
 			var usage wire.Usage
 			var usageReported bool
 			if external == upstreamRoute.Protocol {
@@ -462,6 +479,12 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 				return
 			}
 			responseBody = collapsed
+		}
+		if upstreamRoute.Protocol == wire.Chat {
+			// A chat upstream may answer with a DSML tool call in the message
+			// text; turn it into a real tool_calls entry before the response is
+			// renamed or converted.
+			responseBody = wire.ExtractChatTextToolCalls(responseBody)
 		}
 		responseBody = wire.RenameResponseTool(responseBody, upstreamRoute.Protocol, toolRenames)
 		if usage, reported := wire.ResponseUsage(upstreamRoute.Protocol, responseBody); meta != nil {
