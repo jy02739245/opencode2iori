@@ -335,9 +335,15 @@ type streamToolRenameState struct {
 	decided          bool
 	renamed          bool
 	pending          string
+	resolved         string
 	pendingArguments strings.Builder
-	callIndex        any
-	choiceIndex      any
+	// argMapping is set when the resolved name is an official tool whose
+	// arguments must be rewritten for the client tool. Arguments are buffered
+	// until the call finishes, because a name can change under a fragment that
+	// arrived in the same frame.
+	argMapping  map[string]string
+	callIndex   any
+	choiceIndex any
 }
 
 // streamToolRenamer rewrites the tool names of one protocol's SSE frames,
@@ -409,27 +415,37 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
 						changed = true
 					}
 				}
-				if arguments, exists := function["arguments"]; exists && !state.decided {
-					if renamer.renames.HasLongerPrefix(state.pending) {
-						if fragment, ok := arguments.(string); ok {
+				if arguments, exists := function["arguments"]; exists {
+					if fragment, ok := arguments.(string); ok {
+						// Hold arguments while the name is still ambiguous and
+						// whenever the resolved name is an official tool whose
+						// arguments must be rewritten: a fragment cannot be
+						// rewritten until the whole object is known.
+						hold := state.argMapping != nil || (!state.decided && renamer.renames.HasLongerPrefix(state.pending))
+						if hold {
 							state.pendingArguments.WriteString(fragment)
 							delete(function, "arguments")
 							changed = true
+						} else if !state.decided {
+							if state.pending != "" {
+								function["name"] = state.pending
+								changed = true
+							}
+							state.decided = true
 						}
-					} else {
-						if state.pending != "" {
-							function["name"] = state.pending
-							changed = true
-						}
-						state.decided = true
 					}
 				}
-				if state.decided && renamer.releasePendingArguments(state, function) {
+				if state.decided && state.argMapping == nil && renamer.releasePendingArguments(state, function) {
 					changed = true
 				}
-				if finished && !state.decided && (state.pending != "" || state.pendingArguments.Len() > 0) {
-					if renamer.finishState(state, function) {
+				if finished {
+					if state.argMapping != nil && renamer.takeRemappedArguments(state, function) {
 						changed = true
+					}
+					if !state.decided && (state.pending != "" || state.pendingArguments.Len() > 0) {
+						if renamer.finishState(state, function) {
+							changed = true
+						}
 					}
 				}
 			}
@@ -476,15 +492,43 @@ func (renamer *streamToolRenamer) releasePendingArguments(state *streamToolRenam
 	return true
 }
 
+// takeRemappedArguments rewrites the arguments held for an official call and
+// writes them back under the client tool's argument names. The mapping is
+// cleared so a call is rewritten once.
+func (renamer *streamToolRenamer) takeRemappedArguments(state *streamToolRenameState, function map[string]any) bool {
+	if state.argMapping == nil {
+		return false
+	}
+	mapping := state.argMapping
+	state.argMapping = nil
+	arguments := state.pendingArguments.String()
+	state.pendingArguments.Reset()
+	if current, exists := function["arguments"]; exists {
+		if fragment, ok := current.(string); ok {
+			arguments += fragment
+		}
+	}
+	if arguments == "" {
+		return false
+	}
+	function["arguments"] = RemapArguments(arguments, mapping)
+	return true
+}
+
 // finishState settles a call the choice finished while its name was still
-// ambiguous: the held-back name and arguments are emitted verbatim.
+// ambiguous: the held-back name and arguments are emitted verbatim, or under
+// the client tool's argument names when the name resolved to an official tool.
 func (renamer *streamToolRenamer) finishState(state *streamToolRenameState, function map[string]any) bool {
 	changed := false
 	if state.pending != "" {
 		function["name"] = state.pending
 		changed = true
 	}
-	if renamer.releasePendingArguments(state, function) {
+	if state.argMapping != nil {
+		if renamer.takeRemappedArguments(state, function) {
+			changed = true
+		}
+	} else if renamer.releasePendingArguments(state, function) {
 		changed = true
 	}
 	state.decided, state.renamed = true, false
@@ -500,7 +544,7 @@ func (renamer *streamToolRenamer) pendingCalls(choiceIndex any, skip map[string]
 			continue
 		}
 		state := renamer.tools[key]
-		if state == nil || state.decided || fmt.Sprint(state.choiceIndex) != fmt.Sprint(choiceIndex) {
+		if state == nil || (state.decided && state.argMapping == nil) || fmt.Sprint(state.choiceIndex) != fmt.Sprint(choiceIndex) {
 			continue
 		}
 		if state.pending == "" && state.pendingArguments.Len() == 0 {
@@ -515,10 +559,16 @@ func (renamer *streamToolRenamer) pendingCalls(choiceIndex any, skip map[string]
 // decided.
 func (renamer *streamToolRenamer) pendingCall(state *streamToolRenameState) any {
 	function := map[string]any{}
-	if state.pending != "" {
-		function["name"] = state.pending
+	name := state.resolved
+	if name == "" {
+		name = state.pending
 	}
-	if state.pendingArguments.Len() > 0 {
+	if name != "" {
+		function["name"] = name
+	}
+	if state.argMapping != nil {
+		renamer.takeRemappedArguments(state, function)
+	} else if state.pendingArguments.Len() > 0 {
 		function["arguments"] = state.pendingArguments.String()
 	}
 	call := map[string]any{"index": state.callIndex, "function": function}
@@ -541,7 +591,7 @@ func (renamer *streamToolRenamer) finish() []byte {
 	byIndex := map[string]*choiceCalls{}
 	for _, key := range renamer.order {
 		state := renamer.tools[key]
-		if state == nil || state.decided || state.pending == "" && state.pendingArguments.Len() == 0 {
+		if state == nil || (state.decided && state.argMapping == nil) || (state.pending == "" && state.pendingArguments.Len() == 0) {
 			continue
 		}
 		index := state.choiceIndex
@@ -597,7 +647,7 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 	state.pending = mergeToolName(state.pending, fragment)
 	if client, ok := renamer.renames.Client(state.pending); ok {
 		function["name"] = client
-		state.decided, state.renamed = true, true
+		state.decided, state.renamed, state.resolved = true, true, client
 		return true
 	}
 	if renamer.renames.HasLongerPrefix(state.pending) {
@@ -611,7 +661,12 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 	// declared is written out as the model sent it.
 	client, renamed := renamer.renames.Resolve(state.pending)
 	function["name"] = client
-	state.decided, state.renamed = true, renamed
+	state.decided, state.renamed, state.resolved = true, renamed, client
+	if renamed {
+		if mapping, ok := renamer.renames.OfficialArgs(state.pending); ok {
+			state.argMapping = mapping
+		}
+	}
 	return true
 }
 

@@ -3,6 +3,7 @@ package protocol
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strconv"
 	"strings"
 )
@@ -28,6 +29,10 @@ type ToolRenames struct {
 	toWire   map[string]string
 	toClient map[string]string
 	official map[string]string
+	// argRemap maps an official tool name to the argument names of the client
+	// tool it is restored to. A value of "" drops that argument, because the
+	// client tool schema rejects fields it does not declare.
+	argRemap map[string]map[string]string
 	// byCase and byShape map a folded client name back to the one declared
 	// client tool it names. A value of "" marks a fold two tools share: that
 	// name is never guessed between.
@@ -41,6 +46,7 @@ func NewToolRenames() *ToolRenames {
 		toWire:   map[string]string{},
 		toClient: map[string]string{},
 		official: map[string]string{},
+		argRemap: map[string]map[string]string{},
 		byCase:   map[string]string{},
 		byShape:  map[string]string{},
 	}
@@ -97,6 +103,65 @@ func (r *ToolRenames) Official(official string) (string, bool) {
 	}
 	client, ok := r.official[official]
 	return client, ok
+}
+
+// BindOfficialArgs records how one official tool's argument names map onto the
+// client tool's. An empty value drops that argument: the client tool schema
+// rejects fields it does not declare, so an official argument the client has
+// no name for must not reach it.
+func (r *ToolRenames) BindOfficialArgs(official string, mapping map[string]string) {
+	if r == nil || official == "" || len(mapping) == 0 {
+		return
+	}
+	if r.argRemap == nil {
+		r.argRemap = map[string]map[string]string{}
+	}
+	if _, exists := r.argRemap[official]; !exists {
+		r.argRemap[official] = mapping
+	}
+}
+
+// OfficialArgs returns the argument mapping recorded for one official tool.
+func (r *ToolRenames) OfficialArgs(official string) (map[string]string, bool) {
+	if r == nil || official == "" {
+		return nil, false
+	}
+	mapping, ok := r.argRemap[official]
+	return mapping, ok
+}
+
+// RemapArguments rewrites one serialized JSON argument object from an official
+// tool's argument names to the client tool's. An argument the mapping does not
+// mention is kept as it arrived; a mapping to "" drops the argument.
+func RemapArguments(arguments string, mapping map[string]string) string {
+	if len(mapping) == 0 || arguments == "" {
+		return arguments
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(arguments), &decoded); err != nil {
+		return arguments
+	}
+	out := make(map[string]any, len(decoded))
+	changed := false
+	for key, value := range decoded {
+		target, known := mapping[key]
+		if !known {
+			out[key] = value
+			continue
+		}
+		changed = true
+		if target != "" {
+			out[target] = value
+		}
+	}
+	if !changed {
+		return arguments
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return arguments
+	}
+	return string(encoded)
 }
 
 // Add records one client-to-wire mapping. Adding the same pair twice is a

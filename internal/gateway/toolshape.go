@@ -90,7 +90,7 @@ func officialToolNames(v1 bool) []string {
 func OfficialToolCandidates(officialName string) []string {
 	switch strings.ToLower(officialName) {
 	case "bash", "shell":
-		return []string{"Bash"}
+		return []string{"Bash", "exec_command"}
 	case "edit":
 		return []string{"Edit"}
 	case "glob":
@@ -221,6 +221,7 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 		}
 	}
 	declaredNames := make([]string, 0, len(items))
+	declaredParams := make(map[string]map[string]any, len(items))
 	for _, item := range items {
 		entry, ok := item.(map[string]any)
 		if !ok {
@@ -228,6 +229,9 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 		}
 		if name, ok := renamableToolName(protocol, entry); ok {
 			declaredNames = append(declaredNames, name)
+			if params := toolParameterNames(protocol, entry); len(params) > 0 {
+				declaredParams[name] = params
+			}
 		}
 	}
 	if protocol == wire.Chat || protocol == wire.Responses {
@@ -264,7 +268,7 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 	shaped = append(shaped, officialToolset(protocol, v1)...)
 	payload["tools"] = shaped
 	officialNames := officialToolNames(v1)
-	bindOfficialToolAliases(renames, declaredNames, officialNames)
+	bindOfficialToolAliases(renames, declaredNames, declaredParams, officialNames, v1)
 	declared := make(map[string]string, len(declaredNames))
 	for _, name := range declaredNames {
 		if wireName, ok := renames.Wire(name); ok {
@@ -276,7 +280,7 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 	return renames, true
 }
 
-func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames, officialNames []string) {
+func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames []string, declaredParams map[string]map[string]any, officialNames []string, v1 bool) {
 	for _, official := range officialNames {
 		candidates := OfficialToolCandidates(official)
 		for _, declared := range declaredNames {
@@ -286,6 +290,9 @@ func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames, officialN
 			for _, candidate := range candidates {
 				if match, _ := renames.Resolve(candidate); match == declared {
 					renames.BindOfficial(official, declared)
+					if mapping := officialArgRemap(official, declaredParams[declared], v1); len(mapping) > 0 {
+						renames.BindOfficialArgs(official, mapping)
+					}
 					break
 				}
 			}
@@ -294,6 +301,74 @@ func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames, officialN
 			}
 		}
 	}
+}
+
+// officialArgAliases names the client argument that carries the same meaning
+// as an official argument the client spells differently. Only a rename is
+// listed: an official argument the client does not declare is dropped, because
+// the client tool schema rejects fields it does not know.
+var officialArgAliases = map[string]map[string]string{
+	"bash":  {"command": "cmd"},
+	"shell": {"command": "cmd"},
+}
+
+// officialArgRemap builds the argument mapping from one official tool to the
+// client tool bound to it. An argument the client declares under the same name
+// is kept as is, one the alias table translates is renamed, and the rest map
+// to "" so they are dropped.
+func officialArgRemap(official string, clientParams map[string]any, v1 bool) map[string]string {
+	if len(clientParams) == 0 {
+		return nil
+	}
+	definition, ok := officialToolDefinition(official, v1)
+	if !ok || definition.Parameters == nil {
+		return nil
+	}
+	properties, _ := definition.Parameters["properties"].(map[string]any)
+	if len(properties) == 0 {
+		return nil
+	}
+	mapping := make(map[string]string, len(properties))
+	changed := false
+	for name := range properties {
+		if _, ok := clientParams[name]; ok {
+			mapping[name] = name
+			continue
+		}
+		if alias := officialArgAliases[official][name]; alias != "" {
+			if _, ok := clientParams[alias]; ok {
+				mapping[name] = alias
+				changed = true
+				continue
+			}
+		}
+		mapping[name] = ""
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return mapping
+}
+
+// toolParameterNames returns the declared parameter names of one client tool
+// definition in the protocol's own shape.
+func toolParameterNames(protocol wire.Protocol, entry map[string]any) map[string]any {
+	var parameters map[string]any
+	switch protocol {
+	case wire.Chat:
+		function, _ := entry["function"].(map[string]any)
+		parameters, _ = function["parameters"].(map[string]any)
+	case wire.Responses:
+		parameters, _ = entry["parameters"].(map[string]any)
+	case wire.Anthropic:
+		parameters, _ = entry["input_schema"].(map[string]any)
+	}
+	if parameters == nil {
+		return nil
+	}
+	properties, _ := parameters["properties"].(map[string]any)
+	return properties
 }
 
 func officialToolNameSet(v1 bool) map[string]bool {

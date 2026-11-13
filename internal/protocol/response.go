@@ -563,6 +563,11 @@ func renameToolInMap(payload map[string]any, protocol Protocol, renames *ToolRen
 			return false
 		}
 		container["name"] = client
+		if mapping, ok := renames.OfficialArgs(name); ok {
+			if arguments, ok := container["arguments"].(string); ok {
+				container["arguments"] = RemapArguments(arguments, mapping)
+			}
+		}
 		return true
 	}
 	renameItem := func(item map[string]any) bool {
