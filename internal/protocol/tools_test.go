@@ -141,3 +141,87 @@ func collectStreamCalls(t *testing.T, stream string) (string, string) {
 	}
 	return name, arguments.String()
 }
+
+// TestResolveRebuildsMangledWireName covers a model that imitates a wire name
+// from history and drops one letter.
+func TestResolveRebuildsMangledWireName(t *testing.T) {
+	renames := shellRenames()
+	wireName, _ := renames.Wire("exec_command")
+	digest := strings.TrimPrefix(wireName, ClientToolPrefix)
+	for _, mangled := range []string{"clnt_" + digest, "clit_" + digest} {
+		client, changed := renames.Resolve(mangled)
+		if client != "exec_command" || !changed {
+			t.Fatalf("Resolve(%q) = (%q, %v); want (exec_command, true)", mangled, client, changed)
+		}
+	}
+}
+
+// TestRenameResponseToolRebuildsMangledWireName keeps the argument rewrite out
+// of the way: a mangled name carries client arguments already.
+func TestRenameResponseToolRebuildsMangledWireName(t *testing.T) {
+	renames := shellRenames()
+	wireName, _ := renames.Wire("exec_command")
+	digest := strings.TrimPrefix(wireName, ClientToolPrefix)
+	body := []byte(`{"choices":[{"index":0,"message":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"clnt_` + digest + `","arguments":"{\"cmd\":\"pwd\"}"}}]}}]}`)
+	out := RenameResponseTool(body, Chat, renames)
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatalf("rewritten body is not JSON: %v", err)
+	}
+	function := payload["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if function["name"] != "exec_command" {
+		t.Fatalf("name = %v; want exec_command", function["name"])
+	}
+	if function["arguments"] != `{"cmd":"pwd"}` {
+		t.Fatalf("arguments = %v; want unchanged cmd object", function["arguments"])
+	}
+}
+
+// TestResolveLeavesUnknownMangledNameAlone pins the rebuild to registered wire
+// names: a mangled-looking name that matches nothing stays as it arrived.
+func TestResolveLeavesUnknownMangledNameAlone(t *testing.T) {
+	renames := shellRenames()
+	for _, name := range []string{"clnt_deadbeef0000", "clit_deadbeef0000"} {
+		client, changed := renames.Resolve(name)
+		if client != name || changed {
+			t.Fatalf("Resolve(%q) = (%q, %v); want (%q, false)", name, client, changed, name)
+		}
+	}
+}
+
+// TestResolvePrefersDeclaredLiteralName keeps a client tool whose real name
+// looks mangled from being rewritten into another tool.
+func TestResolvePrefersDeclaredLiteralName(t *testing.T) {
+	renames := shellRenames()
+	wireName, _ := renames.Wire("exec_command")
+	literal := "clnt_" + strings.TrimPrefix(wireName, ClientToolPrefix)
+	renames.Add(literal, ClientToolWireName(literal, map[string]bool{}))
+	client, changed := renames.Resolve(literal)
+	if client != literal || changed {
+		t.Fatalf("Resolve(%q) = (%q, %v); want (%q, false)", literal, client, changed, literal)
+	}
+}
+
+// TestRenameStreamReaderRebuildsMangledWireName covers the stream path when the
+// mangled name arrives in one frame.
+func TestRenameStreamReaderRebuildsMangledWireName(t *testing.T) {
+	renames := shellRenames()
+	wireName, _ := renames.Wire("exec_command")
+	digest := strings.TrimPrefix(wireName, ClientToolPrefix)
+	frames := []string{
+		`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"clnt_` + digest + `","arguments":"{\"cmd\":\"pwd\"}"}}]}}]}`,
+		`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`data: [DONE]`,
+	}
+	out, err := io.ReadAll(RenameStreamReader(strings.NewReader(strings.Join(frames, "\n\n")+"\n\n"), Chat, renames))
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, arguments := collectStreamCalls(t, string(out))
+	if name != "exec_command" {
+		t.Fatalf("name = %q; want exec_command", name)
+	}
+	if arguments != `{"cmd":"pwd"}` {
+		t.Fatalf("arguments = %q; want unchanged cmd object", arguments)
+	}
+}

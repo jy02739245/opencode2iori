@@ -249,8 +249,10 @@ func (r *ToolRenames) HasLongerPrefix(prefix string) bool {
 // Resolve maps a tool name the upstream reported back to the name the client
 // declared. It is the response-side counterpart of the wire rename: an exact
 // wire name restores, an official alias maps to the matching client tool, a
-// clint_ prefix is stripped as a best-effort recovery (for example after a
-// configuration reload mid-stream), and a name that
+// declared client name that looks mangled wins over a rebuilt one, a mangled
+// wire name (clnt_ or clit_ for clint_) is rebuilt when it arrives in one
+// piece, a clint_ prefix is stripped as a best-effort recovery (for example
+// after a configuration reload mid-stream), and a name that
 // differs from exactly one declared client tool only in case, or else only in
 // case and separators (todowrite → todo_write), is folded onto that tool. A
 // name two tools fold to is never guessed between. It reports whether the
@@ -264,6 +266,22 @@ func (r *ToolRenames) Resolve(wire string) (string, bool) {
 	}
 	if client, ok := r.Official(wire); ok {
 		return client, client != wire
+	}
+	// A declared client tool whose literal name looks mangled wins over a
+	// rebuild: the name the client sent is the only authoritative one.
+	if _, declared := r.toWire[wire]; declared {
+		return wire, false
+	}
+	// A model imitating a wire name from history sometimes drops one letter
+	// (clnt_ for clint_, clit_ for clint_). Rebuild the name it mangled so the
+	// call still reaches the tool the client declared. A name a stream splits
+	// across frames is not rebuilt: the first fragment settles the name.
+	for _, mangled := range []string{"clnt_", "clit_"} {
+		if rest, ok := strings.CutPrefix(wire, mangled); ok && rest != "" {
+			if client, ok := r.Client(ClientToolPrefix + rest); ok {
+				return client, client != wire
+			}
+		}
 	}
 	client := wire
 	if rest, ok := strings.CutPrefix(wire, ClientToolPrefix); ok && rest != "" {
