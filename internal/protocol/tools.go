@@ -38,8 +38,9 @@ type ToolRenames struct {
 	// byCase and byShape map a folded client name back to the one declared
 	// client tool it names. A value of "" marks a fold two tools share: that
 	// name is never guessed between.
-	byCase  map[string]string
-	byShape map[string]string
+	byCase   map[string]string
+	byShape  map[string]string
+	adapters map[string]toolArgumentAdapter
 }
 
 // NewToolRenames returns an empty rename set.
@@ -53,12 +54,12 @@ func NewToolRenames() *ToolRenames {
 	}
 }
 
-// Empty reports whether no tool was renamed.
+// Empty reports whether no tool mapping or argument adapter was registered.
 func (r *ToolRenames) Empty() bool {
 	return r == nil || len(r.toWire) == 0
 }
 
-// Count reports how many client tools were renamed.
+// Count reports how many client tools have a registered mapping.
 func (r *ToolRenames) Count() int {
 	if r == nil {
 		return 0
@@ -110,7 +111,7 @@ func (r *ToolRenames) Official(official string) (string, bool) {
 // no-op; a conflicting pair keeps the first wire name so the map stays
 // invertible.
 func (r *ToolRenames) Add(client, wire string) {
-	if r == nil || client == "" || wire == "" || client == wire {
+	if r == nil || client == "" || wire == "" {
 		return
 	}
 	if existing, ok := r.toWire[client]; ok {

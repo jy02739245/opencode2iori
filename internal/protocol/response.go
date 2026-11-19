@@ -533,7 +533,9 @@ func RenameResponseTool(body []byte, protocol Protocol, renames *ToolRenames) []
 		return body
 	}
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if !json.Valid(body) || decoder.Decode(&payload) != nil {
 		return body
 	}
 	if !renameToolInMap(payload, protocol, renames) {
@@ -559,11 +561,18 @@ func renameToolInMap(payload map[string]any, protocol Protocol, renames *ToolRen
 			return false
 		}
 		client, changed := renames.Resolve(name)
-		if !changed {
-			return false
+		if changed {
+			container["name"] = client
 		}
-		container["name"] = client
-		return true
+		for _, key := range []string{"arguments", "input"} {
+			if arguments, exists := container[key]; exists {
+				if converted, adapted := renames.ToClientArguments(name, arguments); adapted {
+					container[key] = converted
+					changed = true
+				}
+			}
+		}
+		return changed
 	}
 	renameItem := func(item map[string]any) bool {
 		switch jsonutil.StringAt(item, "type") {

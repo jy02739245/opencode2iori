@@ -226,10 +226,10 @@ func v1BashDescription(base, platform string) string {
 	}
 }
 
-// renameAndCompleteTools makes the tool list read as an official CLI session:
-// every named client tool is renamed to an opaque wire name, legacy functions
-// arrays are converted, and the full official set for the lane is appended.
-// The returned map restores the client names in the upstream response.
+// renameAndCompleteTools translates declared client tools and their references.
+// V2 reuses compatible official contracts and publishes only client capabilities;
+// V1 retains the legacy appended official set. The returned mappings restore
+// client tool names and arguments in upstream responses.
 func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 bool, platform string) (*wire.ToolRenames, bool) {
 	switch protocol {
 	case wire.Chat, wire.Responses, wire.Anthropic:
@@ -268,7 +268,8 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			delete(payload, "functions")
 		}
 	}
-	shaped := make([]any, 0, len(items)+len(officialToolNames(v1)))
+	shaped := make([]any, 0, len(items))
+	published := map[string]bool{}
 	for _, item := range items {
 		entry, ok := item.(map[string]any)
 		if !ok {
@@ -280,12 +281,24 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			shaped = append(shaped, item)
 			continue
 		}
+		if !v1 {
+			if clientName, spec, match := adaptToolDefinition(entry, protocol, v1); match && renames.BindAdapter(clientName, spec.official, spec.fields, spec.wireFields...) {
+				if !published[spec.official] {
+					shaped = append(shaped, officialTool(protocol, spec.official, v1, platform))
+					published[spec.official] = true
+					used[spec.official] = true
+				}
+				continue
+			}
+		}
 		if wireName := clientWireName(renames, used, name); wireName != name {
 			setToolName(protocol, entry, wireName)
 		}
 		shaped = append(shaped, entry)
 	}
-	shaped = append(shaped, officialToolset(protocol, v1, platform)...)
+	if v1 {
+		shaped = append(shaped, officialToolset(protocol, v1, platform)...)
+	}
 	payload["tools"] = shaped
 	officialNames := officialToolNames(v1)
 	bindOfficialToolAliases(renames, declaredNames, officialNames)
@@ -642,13 +655,25 @@ func rewriteToolReferences(payload map[string]any, protocol wire.Protocol, renam
 		if wireName, ok := renames.Wire(name); ok {
 			container["name"] = wireName
 		}
-	}
-	renameAllowedTools := func(choice map[string]any) {
-		for _, rawEntry := range jsonutil.SliceAt(choice, "allowed_tools") {
-			if entry, ok := rawEntry.(map[string]any); ok {
-				rename(entry)
+		for _, key := range []string{"arguments", "input"} {
+			if arguments, exists := container[key]; exists {
+				if converted, changed := renames.ToWireArguments(name, arguments); changed {
+					container[key] = converted
+				}
 			}
 		}
+	}
+	renameAllowedTools := func(choice map[string]any) {
+		for _, key := range []string{"allowed_tools", "tools"} {
+			for _, rawEntry := range jsonutil.SliceAt(choice, key) {
+				if entry, ok := rawEntry.(map[string]any); ok {
+					rename(entry)
+				}
+			}
+		}
+	}
+	if call, ok := payload["function_call"].(map[string]any); ok && (protocol == wire.Chat || protocol == wire.Responses) {
+		rename(call)
 	}
 	switch protocol {
 	case wire.Chat:
@@ -659,11 +684,11 @@ func rewriteToolReferences(payload map[string]any, protocol wire.Protocol, renam
 				rename(choice)
 			}
 		}
-		if call, ok := payload["function_call"].(map[string]any); ok {
-			rename(call)
-		}
 		for _, rawMessage := range jsonutil.SliceAt(payload, "messages") {
 			message, _ := rawMessage.(map[string]any)
+			if jsonutil.StringAt(message, "role") == "function" {
+				rename(message)
+			}
 			if call, ok := message["function_call"].(map[string]any); ok {
 				rename(call)
 			}

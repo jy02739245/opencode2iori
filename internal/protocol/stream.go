@@ -235,9 +235,8 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 // writers consume the stream. An empty rename set returns reader unchanged.
 //
 // It is a pull-based transform instead of a goroutine plus io.Pipe so a client
-// that disconnects mid-stream cannot strand a blocked writer. Chat frames go
-// through the fragment-aware rewriter, while the other protocols use the
-// stateless RenameResponseTool rewrite on each frame.
+// that disconnects mid-stream cannot strand a blocked writer. Fragmented
+// argument objects are buffered only for tools with a registered adapter.
 func RenameStreamReader(reader io.Reader, protocol Protocol, renames *ToolRenames) io.Reader {
 	if renames.Empty() {
 		return reader
@@ -252,10 +251,11 @@ func RenameStreamReader(reader io.Reader, protocol Protocol, renames *ToolRename
 // upstream stream line by line, rewrites the data lines that need it, and
 // serves the rewritten bytes, carrying an error over to the next Read.
 type renameStreamReader struct {
-	buffer  *bufio.Reader
-	renamer *streamToolRenamer
-	pending []byte
-	err     error
+	buffer    *bufio.Reader
+	renamer   *streamToolRenamer
+	pending   []byte
+	err       error
+	eventName string
 }
 
 // Read returns the rewritten stream bytes, buffering one line at a time.
@@ -280,14 +280,21 @@ func (reader *renameStreamReader) Read(data []byte) (int, error) {
 		}
 		line := string(lineBytes)
 		if len(line) > 0 {
-			reader.pending = reader.rewriteLine(line)
+			pending, rewriteErr := reader.rewriteLine(line)
+			if rewriteErr != nil {
+				reader.err = rewriteErr
+				return 0, rewriteErr
+			}
+			reader.pending = pending
 		}
 		if err != nil {
 			// The final chunk is drained before the error is reported so a
 			// truncated stream still delivers every byte the upstream sent.
 			reader.err = err
 			if errors.Is(err, io.EOF) {
-				if final := reader.renamer.finish(); len(final) > 0 {
+				if reader.renamer.argumentBytes > 0 {
+					reader.err = errStreamToolArguments
+				} else if final := reader.renamer.finish(); len(final) > 0 {
 					if len(reader.pending) > 0 && !bytes.HasSuffix(reader.pending, []byte("\n\n")) && !bytes.HasSuffix(reader.pending, []byte("\r\n\r\n")) {
 						if !bytes.HasSuffix(reader.pending, []byte("\n")) {
 							reader.pending = append(reader.pending, '\n')
@@ -298,7 +305,7 @@ func (reader *renameStreamReader) Read(data []byte) (int, error) {
 				}
 			}
 			if len(reader.pending) == 0 {
-				return 0, err
+				return 0, reader.err
 			}
 		}
 	}
@@ -309,7 +316,7 @@ func (reader *renameStreamReader) Read(data []byte) (int, error) {
 
 // rewriteLine transforms one complete SSE line, preserving its original bytes
 // and terminator whenever nothing needs to be rewritten.
-func (reader *renameStreamReader) rewriteLine(line string) []byte {
+func (reader *renameStreamReader) rewriteLine(line string) ([]byte, error) {
 	body, terminator := line, ""
 	if trimmed := strings.TrimSuffix(line, "\n"); trimmed != line {
 		terminator = "\n"
@@ -320,23 +327,37 @@ func (reader *renameStreamReader) rewriteLine(line string) []byte {
 		}
 	}
 	if !strings.HasPrefix(body, "data:") {
-		return []byte(line)
+		if body == "" {
+			reader.eventName = ""
+		} else if name, ok := strings.CutPrefix(body, "event:"); ok {
+			reader.eventName = strings.TrimSpace(name)
+		}
+		return []byte(line), nil
 	}
 	raw := strings.TrimSpace(strings.TrimPrefix(body, "data:"))
 	if raw == "" {
-		return []byte(line)
+		return []byte(line), nil
 	}
 	if raw == "[DONE]" {
-		if final := reader.renamer.finish(); len(final) > 0 {
-			return append(final, []byte(line)...)
+		if reader.renamer.argumentBytes > 0 {
+			return nil, errStreamToolArguments
 		}
-		return []byte(line)
+		if final := reader.renamer.finish(); len(final) > 0 {
+			return append(final, []byte(line)...), nil
+		}
+		return []byte(line), nil
 	}
-	rewritten := reader.renamer.rewriteFrame(raw)
+	rewritten, err := reader.renamer.rewriteFrame(reader.eventName, raw)
+	if err != nil {
+		return nil, err
+	}
 	if string(rewritten) == raw {
-		return []byte(line)
+		return []byte(line), nil
 	}
-	return []byte("data: " + string(rewritten) + terminator)
+	if reader.renamer.renames.HasAdapters() && len("data: ")+len(rewritten)+len(terminator) >= maxSSEFrameBytes {
+		return nil, errSSEFrameTooLarge
+	}
+	return []byte("data: " + string(rewritten) + terminator), nil
 }
 
 // streamToolRenameState tracks how one tool call's name was resolved while a
@@ -348,6 +369,8 @@ type streamToolRenameState struct {
 	renamed          bool
 	pending          string
 	pendingArguments strings.Builder
+	adapted          *streamArgumentBuffer
+	legacy           bool
 	callIndex        any
 	choiceIndex      any
 }
@@ -356,27 +379,32 @@ type streamToolRenameState struct {
 // keeping per-tool state across frames so a name split over several Chat
 // chunks is reassembled before it is matched.
 type streamToolRenamer struct {
-	protocol Protocol
-	renames  *ToolRenames
-	tools    map[string]*streamToolRenameState
-	order    []string
+	protocol      Protocol
+	renames       *ToolRenames
+	tools         map[string]*streamToolRenameState
+	order         []string
+	arguments     map[string]*streamArgumentBuffer
+	argumentBytes int
 }
 
 // rewriteFrame rewrites one SSE data payload, which is raw JSON text. Frames
 // that cannot carry a tool name are returned untouched, so only a payload that
 // mentions a client alias (Anthropic and Responses) or "tool_calls" (Chat) is
 // decoded.
-func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
+func (renamer *streamToolRenamer) rewriteFrame(eventName, raw string) ([]byte, error) {
 	if renamer.protocol != Chat {
+		if renamer.renames.HasAdapters() && (renamer.protocol == Responses || renamer.protocol == Anthropic) {
+			return renamer.rewriteArgumentFrame(eventName, raw)
+		}
 		// Anthropic and Responses streams always carry a complete tool name in
 		// a single event, so the stateless object rewrite is exact.
 		if !mayCarryToolName([]byte(raw)) {
-			return []byte(raw)
+			return []byte(raw), nil
 		}
-		return RenameResponseTool([]byte(raw), renamer.protocol, renamer.renames)
+		return RenameResponseTool([]byte(raw), renamer.protocol, renamer.renames), nil
 	}
-	if !strings.Contains(raw, `"tool_calls"`) && !strings.Contains(raw, `"finish_reason"`) {
-		return []byte(raw)
+	if !strings.Contains(raw, `"tool_calls"`) && !strings.Contains(raw, `"function_call"`) && !strings.Contains(raw, `"finish_reason"`) {
+		return []byte(raw), nil
 	}
 	return renamer.rewriteChatFrame(raw)
 }
@@ -385,10 +413,16 @@ func (renamer *streamToolRenamer) rewriteFrame(raw string) []byte {
 // keyed by index, then id, then array position, and each name fragment is fed
 // through applyNameFragment so a name split across chunks is restored as a
 // whole. It returns the frame unchanged when nothing was rewritten.
-func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
+func (renamer *streamToolRenamer) rewriteChatFrame(raw string) ([]byte, error) {
 	var payload map[string]any
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return []byte(raw)
+	if renamer.renames.HasAdapters() {
+		decoder := json.NewDecoder(strings.NewReader(raw))
+		decoder.UseNumber()
+		if !json.Valid([]byte(raw)) || decoder.Decode(&payload) != nil {
+			return []byte(raw), nil
+		}
+	} else if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return []byte(raw), nil
 	}
 	changed := false
 	for choicePosition, rawChoice := range jsonutil.SliceAt(payload, "choices") {
@@ -418,57 +452,86 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) []byte {
 				state.callIndex = jsonutil.FirstAny(call["index"], callIndex)
 				state.choiceIndex = choiceIndex
 				seen[key] = true
-				if name, ok := function["name"].(string); ok && name != "" {
-					if renamer.applyNameFragment(state, function, name) {
-						changed = true
-					}
+				rewritten, err := renamer.rewriteChatTool(state, function, finished)
+				if err != nil {
+					return nil, err
 				}
-				if arguments, exists := function["arguments"]; exists && !state.decided {
-					if renamer.renames.HasLongerPrefix(state.pending) {
-						if fragment, ok := arguments.(string); ok {
-							state.pendingArguments.WriteString(fragment)
-							delete(function, "arguments")
-							changed = true
-						}
-					} else {
-						if state.pending != "" {
-							function["name"] = state.pending
-							changed = true
-						}
-						state.decided = true
-					}
+				changed = rewritten || changed
+			}
+			if function := jsonutil.MapAt(message, "function_call"); function != nil {
+				key := fmt.Sprint(choiceIndex) + "\x01legacy"
+				state := renamer.toolState(key)
+				state.legacy = true
+				state.choiceIndex = choiceIndex
+				seen[key] = true
+				rewritten, err := renamer.rewriteChatTool(state, function, finished)
+				if err != nil {
+					return nil, err
 				}
-				if state.decided && renamer.releasePendingArguments(state, function) {
-					changed = true
-				}
-				if finished && !state.decided && (state.pending != "" || state.pendingArguments.Len() > 0) {
-					if renamer.finishState(state, function) {
-						changed = true
-					}
-				}
+				changed = rewritten || changed
 			}
 		}
 		if finished {
-			if calls := renamer.pendingCalls(choiceIndex, seen); len(calls) > 0 {
+			if renamer.argumentBytes > 0 {
+				for _, state := range renamer.tools {
+					if state.adapted != nil && state.adapted.text.Len() > 0 && fmt.Sprint(state.choiceIndex) == fmt.Sprint(choiceIndex) {
+						return nil, errStreamToolArguments
+					}
+				}
+			}
+			for _, key := range renamer.order {
+				state := renamer.tools[key]
+				if seen[key] || !state.hasPendingCall() || fmt.Sprint(state.choiceIndex) != fmt.Sprint(choiceIndex) {
+					continue
+				}
 				delta, _ := choice["delta"].(map[string]any)
 				if delta == nil {
 					delta = map[string]any{}
 					choice["delta"] = delta
 				}
-				existing := jsonutil.SliceAt(delta, "tool_calls")
-				delta["tool_calls"] = append(existing, calls...)
+				renamer.appendPendingCall(state, delta)
 				changed = true
 			}
 		}
 	}
 	if !changed {
-		return []byte(raw)
+		return []byte(raw), nil
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return []byte(raw)
+	return json.Marshal(payload)
+}
+
+func (renamer *streamToolRenamer) rewriteChatTool(state *streamToolRenameState, function map[string]any, finished bool) (bool, error) {
+	changed := false
+	if name, _ := function["name"].(string); name != "" {
+		changed = renamer.applyNameFragment(state, function, name)
 	}
-	return encoded
+	if arguments, exists := function["arguments"]; exists && !state.decided {
+		if renamer.renames.HasLongerPrefix(state.pending) {
+			if fragment, ok := arguments.(string); ok {
+				if len(fragment) > maxSSEFrameBytes-state.pendingArguments.Len() {
+					return false, errSSEFrameTooLarge
+				}
+				state.pendingArguments.WriteString(fragment)
+				delete(function, "arguments")
+				changed = true
+			}
+		} else {
+			if state.pending != "" {
+				function["name"] = state.pending
+				changed = true
+			}
+			state.decided = true
+		}
+	}
+	if state.decided {
+		changed = renamer.releasePendingArguments(state, function) || changed
+		adapted, err := renamer.adaptChatArguments(state, function)
+		return adapted || changed, err
+	}
+	if finished && state.hasPendingCall() {
+		changed = renamer.finishState(state, function) || changed
+	}
+	return changed, nil
 }
 
 // releasePendingArguments prepends the argument fragments held back while the
@@ -505,40 +568,20 @@ func (renamer *streamToolRenamer) finishState(state *streamToolRenameState, func
 	return changed
 }
 
-// pendingCalls collects the undecided calls of one choice that the finishing
-// frame did not carry, so they are flushed before the choice ends.
-func (renamer *streamToolRenamer) pendingCalls(choiceIndex any, skip map[string]bool) []any {
-	var calls []any
-	for _, key := range renamer.order {
-		if skip[key] {
-			continue
-		}
-		state := renamer.tools[key]
-		if state == nil || state.decided || fmt.Sprint(state.choiceIndex) != fmt.Sprint(choiceIndex) {
-			continue
-		}
-		if state.pending == "" && state.pendingArguments.Len() == 0 {
-			continue
-		}
-		calls = append(calls, renamer.pendingCall(state))
-	}
-	return calls
+func (state *streamToolRenameState) hasPendingCall() bool {
+	return !state.decided && (state.pending != "" || state.pendingArguments.Len() > 0)
 }
 
-// pendingCall renders one held-back call as a tool_calls delta and marks it
-// decided.
-func (renamer *streamToolRenamer) pendingCall(state *streamToolRenameState) any {
+// appendPendingCall adds a call held back during name resolution to the choice delta.
+func (renamer *streamToolRenamer) appendPendingCall(state *streamToolRenameState, delta map[string]any) {
 	function := map[string]any{}
-	if state.pending != "" {
-		function["name"] = state.pending
-	}
-	if state.pendingArguments.Len() > 0 {
-		function["arguments"] = state.pendingArguments.String()
+	renamer.finishState(state, function)
+	if state.legacy {
+		delta["function_call"] = function
+		return
 	}
 	call := map[string]any{"index": state.callIndex, "function": function}
-	state.decided, state.renamed = true, false
-	state.pendingArguments.Reset()
-	return call
+	delta["tool_calls"] = append(jsonutil.SliceAt(delta, "tool_calls"), call)
 }
 
 // finish flushes every call still held back when the stream ends without a
@@ -549,13 +592,13 @@ func (renamer *streamToolRenamer) finish() []byte {
 	}
 	type choiceCalls struct {
 		index any
-		calls []any
+		delta map[string]any
 	}
 	var groups []*choiceCalls
 	byIndex := map[string]*choiceCalls{}
 	for _, key := range renamer.order {
 		state := renamer.tools[key]
-		if state == nil || state.decided || state.pending == "" && state.pendingArguments.Len() == 0 {
+		if !state.hasPendingCall() {
 			continue
 		}
 		index := state.choiceIndex
@@ -565,11 +608,11 @@ func (renamer *streamToolRenamer) finish() []byte {
 		indexKey := fmt.Sprint(index)
 		group := byIndex[indexKey]
 		if group == nil {
-			group = &choiceCalls{index: index}
+			group = &choiceCalls{index: index, delta: map[string]any{}}
 			byIndex[indexKey] = group
 			groups = append(groups, group)
 		}
-		group.calls = append(group.calls, renamer.pendingCall(state))
+		renamer.appendPendingCall(state, group.delta)
 	}
 	if len(groups) == 0 {
 		return nil
@@ -578,7 +621,7 @@ func (renamer *streamToolRenamer) finish() []byte {
 	for _, group := range groups {
 		choices = append(choices, map[string]any{
 			"index":         group.index,
-			"delta":         map[string]any{"tool_calls": group.calls},
+			"delta":         group.delta,
 			"finish_reason": nil,
 		})
 	}
