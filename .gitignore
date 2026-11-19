@@ -9,6 +9,7 @@ opencode/
 *.log
 .tmp/
 .gocache/
+__pycache__/
 *.models.catalog.json
 coverage.out
 *.test

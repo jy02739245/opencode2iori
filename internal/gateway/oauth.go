@@ -271,7 +271,7 @@ func (g *Gateway) oauthAttempt(ctx context.Context, route models.Route, body []b
 		meta.Tier = string(route.Tier)
 	}
 	started := time.Now()
-	resp, err := doInferenceAttempt(&client, req, firstEventTimeout, g.attemptTimeout)
+	resp, err := g.doProxyInferenceAttempt(proxy, &client, req, firstEventTimeout)
 	if resp != nil {
 		sanitizeOAuthResponse(resp, connection.Credential)
 		invalidate := g.onGoOAuthUnauthorized

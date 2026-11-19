@@ -208,6 +208,8 @@ Mark a provider-managed rotating endpoint with `pool+https://proxy.example:8443`
 
 An explicit `x-session-id` provides conversation affinity. OpenCode session headers and supported conversation fields also work; otherwise the initial system/user content supplies a seed. Generated identities are scoped to the local API key and process lifetime. Valid official OpenCode session IDs are preserved. Separate independent conversations with explicit IDs and use separate keys where user isolation is required; identical starts under one key can share affinity.
 
+When an upstream HTTP 429 is followed by failover to another configured proxy, the next attempt uses a fresh upstream session ID. A rotating `#pool` endpoint also renews the session when its next attempt opens a fresh connection. Existing session headers are updated together and old parent-session affinity is removed; the project, request body, client identity, and routing cursor remain unchanged. The override lasts only for that client request. Changing keys on the same static proxy or failing over after another status does not renew the session. Existing retry limits, cooldowns, OAuth stopping rules, and the separate WARP path are unchanged. Session renewals are recorded as `proxy_session_retry` events.
+
 An optional `models.anonymous_backoff` object pauses the anonymous lane after repeated failures. Its defaults are threshold `6`, base `1` hour, maximum `24` hours. Omitting the object disables this lane-level breaker.
 
 ### Free-model request shaping and reasoning

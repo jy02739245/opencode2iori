@@ -154,6 +154,7 @@ func debugKeyOverrideFrom(ctx context.Context) (DebugKeyOverride, bool) {
 // buffered (up to 1 MiB) so it can be read again. Debug key overrides skip the
 // replay so the Playground sees the selected key's own answer.
 func (g *Gateway) doUpstream(ctx context.Context, route models.Route, bodies map[config.Tier][]byte, ids identity.RequestIDs) (*http.Response, models.Route, error) {
+	ctx = withProxySessionRetry(ctx)
 	resp, effectiveRoute, attempts, err := g.doUpstreamTiers(ctx, route, bodies, ids, 0)
 	if _, selected := debugKeyOverrideFrom(ctx); selected || !effectiveRoute.Anonymous && g.tierOAuth(effectiveRoute.Tier) != nil {
 		return resp, effectiveRoute, err
@@ -554,7 +555,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			}
 			setRequestCredential(ctx, config.TierZen, "anonymous", "anonymous", true, node.proxy)
 			started := time.Now()
-			resp, err := doInferenceAttempt(g.inferenceClient(node.proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
+			resp, err := g.doProxyInferenceAttempt(node.proxy, g.inferenceClient(node.proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
 			duration := time.Since(started)
 			lastResponse = replaceRetryResponse(lastResponse, resp)
 			if ctx.Err() != nil {
@@ -986,7 +987,7 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 	if useWARP {
 		resp, egress, err = g.doWARPAttempt(ctx, req, baseURL, route.ID, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
 	} else {
-		resp, err = doInferenceAttempt(g.inferenceClient(proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
+		resp, err = g.doProxyInferenceAttempt(proxy, g.inferenceClient(proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
 	}
 	duration := time.Since(started)
 	recordProxy := proxy
@@ -1105,7 +1106,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 		if attemptUseWARP {
 			resp, egress, err = g.doWARPAttempt(ctx, req, baseURL, route.ID, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
 		} else {
-			resp, err = doInferenceAttempt(g.inferenceClient(proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second, g.attemptTimeout)
+			resp, err = g.doProxyInferenceAttempt(proxy, g.inferenceClient(proxy, baseURL, route.ID), req, time.Duration(g.cfg.Performance.FirstEventTimeoutSeconds)*time.Second)
 		}
 		attemptDuration := time.Since(attemptStarted)
 		lastResponse = replaceRetryResponse(lastResponse, resp)

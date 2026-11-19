@@ -95,6 +95,7 @@ func (g *Gateway) handleRotation(w http.ResponseWriter, r *http.Request, externa
 	g.syncRotation()
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(g.cfg.Retry.TimeoutSeconds)*time.Second)
 	defer cancel()
+	ctx = withProxySessionRetry(ctx)
 	ids := identity.DeriveRequestIDs(r, payload, callerScope(r.Context()))
 	meta := telemetry.MetaFromRequest(r)
 	if meta != nil {
@@ -268,7 +269,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		if proxy.pool {
 			req.Close = true
 		}
-		resp, err = doInferenceAttempt(&client, req, 0, g.attemptTimeout)
+		resp, err = g.doProxyInferenceAttempt(proxy, &client, req, 0)
 		if err != nil && ctx.Err() != nil && parent.Err() == nil && !isProxyFailure(err) {
 			err = errFirstEventTimeout
 		}
