@@ -6,9 +6,10 @@ import (
 )
 
 type toolArgumentAdapter struct {
-	toClient   map[string]string
-	toWire     map[string]string
-	wireFields map[string]bool
+	toClient     map[string]string
+	toWire       map[string]string
+	wireFields   map[string]bool
+	clientFields map[string]bool
 }
 
 // BindAdapter registers a tool contract and its top-level wire-to-client fields.
@@ -50,6 +51,27 @@ func (r *ToolRenames) BindAdapter(client, wire string, fields map[string]string,
 	return true
 }
 
+// BindClientSchema retains closed client properties for returned arguments only.
+// Schemas allowing additional properties keep those values, as JSON Schema requires.
+func (r *ToolRenames) BindClientSchema(wire string, schema map[string]any) {
+	if r == nil {
+		return
+	}
+	adapter, exists := r.adapters[wire]
+	if !exists {
+		return
+	}
+	adapter.clientFields = nil
+	if additional, ok := schema["additionalProperties"].(bool); ok && !additional {
+		properties, _ := schema["properties"].(map[string]any)
+		adapter.clientFields = make(map[string]bool, len(properties))
+		for field := range properties {
+			adapter.clientFields[field] = true
+		}
+	}
+	r.adapters[wire] = adapter
+}
+
 // HasAdapters reports whether this request has any argument contracts to adapt.
 func (r *ToolRenames) HasAdapters() bool {
 	return r != nil && len(r.adapters) > 0
@@ -73,7 +95,7 @@ func (r *ToolRenames) ToClientArguments(wire string, arguments any) (any, bool) 
 	if !ok {
 		return arguments, false
 	}
-	return translateArgumentKeys(arguments, adapter.toClient, nil)
+	return translateArgumentKeys(arguments, adapter.toClient, adapter.clientFields)
 }
 
 // ToWireArguments converts client history back to the contract shown upstream.

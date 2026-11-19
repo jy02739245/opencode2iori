@@ -703,13 +703,11 @@ func (g *Gateway) inferenceClient(proxy *proxyTransport, baseURL, model string) 
 // tools are renamed and completed for the lane v1 selects; an unchanged body is
 // returned as is.
 //
-// Every named client tool becomes an opaque wire name (see
-// protocol.ClientToolWireName: a client tool name that survives on the wire is
-// what the free tier refuses) and the full official set for the lane is
-// appended, so the request looks like an official CLI session on both the v1
-// (/zen) and v2 lanes. System One payloads are decision requests, not agent
-// traffic, so they are forwarded verbatim, as is a body that is not a JSON
-// object.
+// Both lanes put the full official tool set first, including title requests.
+// Same-name client definitions are discarded; response adapters restore their
+// names and arguments. Client-only tools retain opaque wire names.
+// System One payloads are decision requests, not agent traffic, so they are
+// forwarded verbatim, as is a body that is not a JSON object.
 func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environment *config.PromptEnvironmentConfig) ([]byte, *wire.ToolRenames) {
 	if protocol == wire.SystemOne {
 		return body, nil
@@ -718,7 +716,6 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environm
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return body, nil
 	}
-	isTitle := isTitleGenerationRequest(payload)
 	changed := false
 	if streaming, ok := payload["stream"].(bool); !ok || !streaming {
 		payload["stream"] = true
@@ -730,17 +727,13 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol, v1 bool, environm
 	if injectOfficialPrompt(payload, protocol, v1, environment) {
 		changed = true
 	}
-	var renames *wire.ToolRenames
-	if !isTitle {
-		platform := ""
-		if environment != nil {
-			platform = environment.Platform
-		}
-		var toolsChanged bool
-		renames, toolsChanged = renameAndCompleteTools(payload, protocol, v1, platform)
-		if toolsChanged {
-			changed = true
-		}
+	platform := ""
+	if environment != nil {
+		platform = environment.Platform
+	}
+	renames, toolsChanged := renameAndCompleteTools(payload, protocol, v1, platform)
+	if toolsChanged {
+		changed = true
 	}
 	if !v1 && protocol == wire.Chat && ensureV2CompletionLimit(payload) {
 		changed = true

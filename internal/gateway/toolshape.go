@@ -226,9 +226,8 @@ func v1BashDescription(base, platform string) string {
 	}
 }
 
-// renameAndCompleteTools translates declared client tools and their references.
-// V2 reuses compatible official contracts and publishes only client capabilities;
-// V1 retains the legacy appended official set. The returned mappings restore
+// renameAndCompleteTools publishes official contracts first, discards same-name
+// client definitions, and appends renamed client-only tools. The mappings restore
 // client tool names and arguments in upstream responses.
 func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 bool, platform string) (*wire.ToolRenames, bool) {
 	switch protocol {
@@ -268,8 +267,7 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			delete(payload, "functions")
 		}
 	}
-	shaped := make([]any, 0, len(items))
-	published := map[string]bool{}
+	shaped := officialToolset(protocol, v1, platform)
 	for _, item := range items {
 		entry, ok := item.(map[string]any)
 		if !ok {
@@ -281,23 +279,18 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			shaped = append(shaped, item)
 			continue
 		}
-		if !v1 {
-			if clientName, spec, match := adaptToolDefinition(entry, protocol, v1); match && renames.BindAdapter(clientName, spec.official, spec.fields, spec.wireFields...) {
-				if !published[spec.official] {
-					shaped = append(shaped, officialTool(protocol, spec.official, v1, platform))
-					published[spec.official] = true
-					used[spec.official] = true
+		if clientName, spec, match := adaptToolDefinition(entry, protocol, v1); match {
+			if _, bound := renames.Client(spec.official); !bound {
+				if renames.BindAdapter(clientName, spec.official, spec.fields, spec.wireFields...) {
+					renames.BindClientSchema(spec.official, spec.clientSchema)
 				}
-				continue
 			}
+			continue
 		}
 		if wireName := clientWireName(renames, used, name); wireName != name {
 			setToolName(protocol, entry, wireName)
 		}
 		shaped = append(shaped, entry)
-	}
-	if v1 {
-		shaped = append(shaped, officialToolset(protocol, v1, platform)...)
 	}
 	payload["tools"] = shaped
 	officialNames := officialToolNames(v1)

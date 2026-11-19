@@ -7,10 +7,10 @@ import (
 	"strings"
 )
 
-// ClientToolPrefix marks every client tool the gateway renames on a shaped
-// free-tier request. The prefix keeps client tools distinct from the official
-// OpenCode set the gateway appends, and lets responses be restored to the names
-// the client declared. What follows it is a digest, never the client name: the
+// ClientToolPrefix marks client-only tools appended after the complete official
+// OpenCode set on shaped free-tier requests. Same-name tools keep official wire
+// names with local client contracts for response adaptation. The prefix lets
+// other responses restore client names. Its suffix is a digest: the
 // free tier refuses bodies that still read as another client's session.
 //
 // The free tier refuses the literal "clint_" (case-insensitively) in a tool

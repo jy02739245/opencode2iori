@@ -285,6 +285,7 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 		meta := telemetry.MetaFromRequest(r)
 		if meta != nil {
 			meta.Model = model
+			meta.Stream = jsonutil.BoolAt(payload, "stream")
 		}
 		if model == "" {
 			wire.WriteError(w, external, http.StatusBadRequest, "model is required", "invalid_request_error", "model")

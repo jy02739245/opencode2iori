@@ -17,6 +17,7 @@ func streamTestToolAdapters(t *testing.T) *ToolRenames {
 		!r.BindAdapter("client_edit", "edit", map[string]string{"oldString": "old_string"}) {
 		t.Fatal("could not register tool adapters")
 	}
+	r.BindClientSchema("read", map[string]any{"additionalProperties": false, "properties": map[string]any{"file_path": map[string]any{"type": "string"}, "nested": map[string]any{}}})
 	r.Add("glob", "mcp_glob")
 	return r
 }
@@ -62,7 +63,7 @@ func TestStreamAdapterChatInterleaved(t *testing.T) {
 	rawOnly := streamTestChat(streamTestChoice(0, nil, streamTestCall(2, "", "", `th":"untouched"}`)))
 	textOnly := "data: {\"choices\":[{\"index\":0, \"delta\":{\"content\":\"path\"}}]}\n\n"
 	input := streamTestChat(streamTestChoice(0, nil, streamTestCall(0, "r0", "re", `{"pa`), streamTestCall(1, "e1", "edit", `{"old`), streamTestCall(2, "g2", "mcp_glob", `{"pa`)),
-		streamTestChoice(1, nil, streamTestCall(0, "r1", "read", `{"path":"other.txt"}`))) +
+		streamTestChoice(1, nil, streamTestCall(0, "r1", "read", `{"path":"other.txt","discarded":true}`))) +
 		textOnly + streamTestChat(streamTestChoice(0, nil, edit("", `String":"path", "nested":{"oldString":"path"}}`))) +
 		streamTestChat(streamTestChoice(0, nil, read("ad", `th":"literal \`))) + rawOnly +
 		streamTestChat(streamTestChoice(0, "tool_calls", read("", `"path\" and }", "nested":[{"path":9007199254740993}]}`)), streamTestChoice(1, "tool_calls")) + "data: [DONE]\n\n"
@@ -186,10 +187,10 @@ func TestStreamAdapterResponses(t *testing.T) {
 	delta := func(seq int, id, fragment string) string {
 		return streamTestEvent("response.function_call_arguments.delta", map[string]any{"sequence_number": seq, "item_id": id, "delta": fragment})
 	}
-	readArgs := `{"path":"notes", "nested":{"path":"literal"}}`
+	readArgs := `{"path":"notes", "nested":{"path":"literal"},"discarded":true}`
 	editArgs := `{"oldString":"x"}`
 	input := added(0, "r", "read") + added(1, "e", "edit") +
-		delta(2, "e", `{"old`) + delta(3, "r", `{"pa`) + delta(4, "e", `String":"x"}`) + delta(5, "r", `th":"notes", "nested":{"path":"literal"}}`) +
+		delta(2, "e", `{"old`) + delta(3, "r", `{"pa`) + delta(4, "e", `String":"x"}`) + delta(5, "r", `th":"notes", "nested":{"path":"literal"},"discarded":true}`) +
 		streamTestEvent("response.function_call_arguments.done", map[string]any{"sequence_number": 6, "item_id": "r", "arguments": readArgs}) +
 		streamTestEvent("response.output_item.done", map[string]any{"sequence_number": 7, "item": item("e", "edit", editArgs)}) +
 		streamTestEvent("response.completed", map[string]any{"sequence_number": 8, "response": map[string]any{"output": []any{item("r", "read", readArgs), item("e", "edit", editArgs)}}})
@@ -246,7 +247,7 @@ func TestStreamAdapterAnthropic(t *testing.T) {
 	}
 	stop := streamTestEvent("content_block_stop", map[string]any{"index": 0})
 	open := start(0, "tool_r", "read", map[string]any{}) + delta(0, `{"pa`)
-	input := open + delta(0, `th":"a.txt","nested":{"path":"path"}}`) + stop +
+	input := open + delta(0, `th":"a.txt","nested":{"path":"path"},"discarded":true}`) + stop +
 		start(1, "tool_e", "edit", map[string]any{"oldString": "hello", "n": json.Number("9007199254740993")}) +
 		streamTestEvent("content_block_stop", map[string]any{"index": 1}) + streamTestEvent("message_stop", map[string]any{})
 	out, err := io.ReadAll(RenameStreamReader(strings.NewReader(input), Anthropic, streamTestToolAdapters(t)))

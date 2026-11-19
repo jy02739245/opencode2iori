@@ -56,12 +56,10 @@ func isTitleGenerationBody(body []byte) bool {
 // isTitleGenerationRequest reports whether payload is OpenCode's session-title
 // call rather than agent traffic.
 //
-// OpenCode sends title calls with no tools. The free tier accepts that form but
-// answers 403 FreeTierError or 429 FreeUsageLimitError once an agent tool list
-// is attached, so the gateway must not inject tools into it. To keep agent
-// traffic from matching, a title request has no tools, at most
-// titleMaxMessages messages, no assistant or tool turn, and a known title
-// prompt in the role OpenCode uses for it.
+// Classify the original request before official tools are added. To keep agent
+// traffic from matching, a title request has no tools, at most titleMaxMessages
+// messages, no assistant or tool turn, and a known title prompt in the role
+// OpenCode uses for it.
 func isTitleGenerationRequest(payload map[string]any) bool {
 	if payload == nil {
 		return false

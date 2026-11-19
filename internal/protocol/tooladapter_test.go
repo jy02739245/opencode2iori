@@ -103,6 +103,30 @@ func TestToolAdapterOfficialHistoryFields(t *testing.T) {
 	}
 }
 
+func TestClientSchemaAdditionalProperties(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		schema map[string]any
+		want   string
+	}{
+		{"closed", map[string]any{"additionalProperties": false, "properties": map[string]any{"file_path": map[string]any{"type": "string"}}}, `{"file_path":"a.txt"}`},
+		{"closed empty", map[string]any{"additionalProperties": false}, `{}`},
+		{"open", map[string]any{"additionalProperties": true}, `{"extra":9007199254740993,"file_path":"a.txt"}`},
+		{"implicit open", nil, `{"extra":9007199254740993,"file_path":"a.txt"}`},
+		{"typed additional", map[string]any{"additionalProperties": map[string]any{"type": "integer"}}, `{"extra":9007199254740993,"file_path":"a.txt"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			renames := NewToolRenames()
+			renames.BindAdapter("read", "read", map[string]string{"path": "file_path"})
+			renames.BindClientSchema("read", tc.schema)
+			got, _ := renames.ToClientArguments("read", `{"path":"a.txt","extra":9007199254740993}`)
+			if got != tc.want {
+				t.Fatalf("returned %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRenameResponseToolAdaptsArguments(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -120,7 +144,12 @@ func TestRenameResponseToolAdaptsArguments(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			renames := NewToolRenames()
 			renames.BindAdapter("read", "read", map[string]string{"path": "file_path"})
-			result := RenameResponseTool([]byte(tc.body), tc.protocol, renames)
+			renames.BindClientSchema("read", map[string]any{"additionalProperties": false, "properties": map[string]any{"file_path": map[string]any{"type": "string"}, "nested": map[string]any{}}})
+			body := strings.NewReplacer(`\"path\":\"a.txt\"`, `\"path\":\"a.txt\",\"discarded\":true`, `"path":"a.txt"`, `"path":"a.txt","discarded":true`).Replace(tc.body)
+			result := RenameResponseTool([]byte(body), tc.protocol, renames)
+			if strings.Contains(string(result), "discarded") {
+				t.Fatalf("closed client schema received an extra field: %s", result)
+			}
 			if strings.Contains(tc.body, "9007199254740993") && !strings.Contains(string(result), "9007199254740993") {
 				t.Fatalf("large integer changed during argument adaptation: %s", result)
 			}

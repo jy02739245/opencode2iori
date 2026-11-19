@@ -67,6 +67,49 @@ func adapterTool(protocol wire.Protocol, name string, schema map[string]any) map
 	return map[string]any{"type": "function", "name": name, "description": description, "parameters": schema}
 }
 
+func TestOfficialToolReturnsUseClientSchema(t *testing.T) {
+	cases := []struct {
+		name       string
+		schema     map[string]any
+		arguments  map[string]any
+		wantClient map[string]any
+	}{
+		{"write", map[string]any{"type": "object", "properties": map[string]any{"file_path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}}, "required": []any{"file_path", "content"}, "additionalProperties": false},
+			map[string]any{"path": "fixture.txt", "content": "new content", "unexpected": true}, map[string]any{"file_path": "fixture.txt", "content": "new content"}},
+		{"read", map[string]any{"type": "object", "properties": map[string]any{"file_path": map[string]any{"type": "string"}, "path": map[string]any{"type": "string"}}, "required": []any{"file_path"}, "additionalProperties": false},
+			map[string]any{"path": "fixture.txt", "limit": 20}, map[string]any{"file_path": "fixture.txt"}},
+		{"grep", map[string]any{"type": "object", "properties": map[string]any{"pattern": map[string]any{"type": "string"}}, "required": []any{"pattern"}, "additionalProperties": false},
+			map[string]any{"pattern": "needle", "literal": true}, map[string]any{"pattern": "needle"}},
+	}
+	for _, protocol := range []wire.Protocol{wire.Chat, wire.Responses, wire.Anthropic} {
+		for _, v1 := range []bool{false, true} {
+			for _, tc := range cases {
+				originalSchema := cloneJSONMap(tc.schema)
+				payload := map[string]any{"tools": []any{adapterTool(protocol, strings.ToUpper(tc.name), tc.schema)}}
+				renames, _ := renameAndCompleteTools(payload, protocol, v1, "darwin")
+				if !reflect.DeepEqual(payload["tools"], officialToolset(protocol, v1, "darwin")) {
+					t.Fatalf("%s v1=%v: client schema leaked upstream", protocol, v1)
+				}
+				arguments := cloneJSONMap(tc.arguments)
+				if v1 && (tc.name == "read" || tc.name == "write") {
+					arguments["filePath"] = arguments["path"]
+					delete(arguments, "path")
+				}
+				converted, _ := renames.ToClientArguments(tc.name, arguments)
+				if !reflect.DeepEqual(converted, tc.wantClient) {
+					t.Fatalf("%s %s v1=%v: returned %#v, want %#v", protocol, tc.name, v1, converted, tc.wantClient)
+				}
+				if name := renames.Restore(tc.name); name != strings.ToUpper(tc.name) {
+					t.Fatalf("client name was not restored: %s", name)
+				}
+				if !reflect.DeepEqual(tc.schema, originalSchema) {
+					t.Fatal("client schema was mutated")
+				}
+			}
+		}
+	}
+}
+
 func TestToolAdapterDefinitions(t *testing.T) {
 	for _, protocol := range []wire.Protocol{wire.Chat, wire.Responses, wire.Anthropic} {
 		t.Run(string(protocol), func(t *testing.T) {
@@ -86,10 +129,10 @@ func TestToolAdapterDefinitions(t *testing.T) {
 				t.Fatal("not shaped")
 			}
 			tools := payload["tools"].([]any)
-			if len(tools) != 3 {
-				t.Fatalf("got %d declarations, want only 3 bound tools", len(tools))
+			if len(tools) != len(officialToolNames(false)) {
+				t.Fatalf("got %d declarations, want the complete official set", len(tools))
 			}
-			for index, name := range []string{"read", "edit", "skill"} {
+			for index, name := range officialToolNames(false) {
 				tool := tools[index].(map[string]any)
 				expected := officialTool(protocol, name, false, "darwin")
 				if !reflect.DeepEqual(tool, expected) {
@@ -120,7 +163,7 @@ func TestToolAdapterDefinitions(t *testing.T) {
 	}
 }
 
-func TestToolAdapterSchemaFallback(t *testing.T) {
+func TestOfficialDefinitionsOverrideClientSchema(t *testing.T) {
 	cases := map[string]func(map[string]any){
 		"wrong field type": func(schema map[string]any) {
 			schema["properties"].(map[string]any)["file_path"] = map[string]any{"type": "number"}
@@ -148,42 +191,53 @@ func TestToolAdapterSchemaFallback(t *testing.T) {
 			original := cloneJSONMap(schema)
 			payload := map[string]any{"tools": []any{adapterTool(wire.Chat, "read", schema)}}
 			renames, _ := renameAndCompleteTools(payload, wire.Chat, false, "darwin")
-			tools := payload["tools"].([]any)
-			if len(tools) != 1 {
-				t.Fatalf("got %d declarations", len(tools))
+			if !reflect.DeepEqual(payload["tools"], officialToolset(wire.Chat, false, "darwin")) {
+				t.Fatal("same-name client schema was published instead of the official set")
 			}
-			actualSchema, name, _ := toolSchema(tools[0].(map[string]any), wire.Chat)
-			if !strings.HasPrefix(name, wire.ClientToolPrefix) || renames.HasArgumentAdapter("read") {
-				t.Fatalf("incompatible schema adapted as %s", name)
+			if wireName, ok := renames.Wire("read"); !ok || wireName != "read" {
+				t.Fatalf("same-name tool was renamed to %q", wireName)
 			}
-			if !reflect.DeepEqual(original, cloneJSONMap(actualSchema)) {
-				t.Fatal("fallback changed schema")
+			if !reflect.DeepEqual(original, cloneJSONMap(schema)) {
+				t.Fatal("client schema was mutated")
+			}
+			arguments, _ := renames.ToClientArguments("read", `{"path":"fixture.txt"}`)
+			want := `{"file_path":"fixture.txt"}`
+			if arguments != want {
+				t.Fatalf("returned arguments = %v, want %s", arguments, want)
 			}
 		})
 	}
 }
 
-func TestToolAdapterNoUnboundOfficialToolsAndV1(t *testing.T) {
+func TestToolAdapterCompletesOfficialToolsAndV1(t *testing.T) {
 	for _, protocol := range []wire.Protocol{wire.Chat, wire.Responses, wire.Anthropic} {
-		payload := map[string]any{}
-		renameAndCompleteTools(payload, protocol, false, "darwin")
-		if len(payload["tools"].([]any)) != 0 {
-			t.Fatal("v2 added tools without executor")
+		for _, body := range []map[string]any{{}, {"tools": []any{}}} {
+			renameAndCompleteTools(body, protocol, false, "darwin")
+			if !reflect.DeepEqual(body["tools"], officialToolset(protocol, false, "darwin")) {
+				t.Fatalf("%s: missing or empty declarations did not receive the official set", protocol)
+			}
 		}
-		payload = map[string]any{"tools": []any{adapterTool(protocol, "create_goal", map[string]any{"type": "object", "properties": map[string]any{}})}}
+		payload := map[string]any{"tools": []any{adapterTool(protocol, "create_goal", map[string]any{"type": "object", "properties": map[string]any{}})}}
 		renameAndCompleteTools(payload, protocol, false, "darwin")
 		tools := payload["tools"].([]any)
-		if len(tools) != 1 {
-			t.Fatal("client-only tool lost or unbound official tools added")
+		if len(tools) != len(officialToolNames(false))+1 {
+			t.Fatal("client-only tool or full official set missing")
 		}
-		_, name, _ := toolSchema(tools[0].(map[string]any), protocol)
+		_, name, _ := toolSchema(tools[len(tools)-1].(map[string]any), protocol)
 		if !strings.HasPrefix(name, wire.ClientToolPrefix) {
 			t.Fatalf("client-only name %q", name)
 		}
+		if !reflect.DeepEqual(tools[:len(tools)-1], officialToolset(protocol, false, "darwin")) {
+			t.Fatal("official set was not placed before client tools")
+		}
 		payload = map[string]any{"tools": []any{adapterTool(protocol, "read", adapterSchema("read"))}}
 		renames, _ := renameAndCompleteTools(payload, protocol, true, "darwin")
-		if len(payload["tools"].([]any)) != len(officialToolNames(true))+1 || renames.HasAdapters() {
-			t.Fatal("v1 behavior changed")
+		if !reflect.DeepEqual(payload["tools"], officialToolset(protocol, true, "darwin")) {
+			t.Fatal("v1 same-name client tool was not replaced with its official contract")
+		}
+		arguments, _ := renames.ToClientArguments("read", `{"filePath":"fixture.txt"}`)
+		if arguments != `{"file_path":"fixture.txt"}` {
+			t.Fatalf("v1 returned arguments = %v", arguments)
 		}
 	}
 }
@@ -203,6 +257,41 @@ func assertCanonicalArguments(t *testing.T, value any) {
 	}
 	if !reflect.DeepEqual(arguments, map[string]any{"path": "fixture.txt"}) {
 		t.Fatalf("history is not limited to official properties: %#v", arguments)
+	}
+}
+
+func TestOfficialToolsPrecedeClientOnlyTools(t *testing.T) {
+	for _, protocol := range []wire.Protocol{wire.Chat, wire.Responses, wire.Anthropic} {
+		for _, v1 := range []bool{false, true} {
+			items := []any{adapterTool(protocol, "create_goal", adapterSchema("create_goal"))}
+			for _, name := range officialToolNames(v1) {
+				items = append(items, adapterTool(protocol, strings.ToUpper(name), adapterSchema(name)))
+			}
+			// A repeated declaration must neither publish a duplicate nor replace its adapter.
+			items = append(items, adapterTool(protocol, "READ", nil))
+			payload := map[string]any{"tools": items}
+			renames, _ := renameAndCompleteTools(payload, protocol, v1, "darwin")
+			tools := payload["tools"].([]any)
+			officials := officialToolset(protocol, v1, "darwin")
+			if len(tools) != len(officials)+1 || !reflect.DeepEqual(tools[:len(officials)], officials) {
+				t.Fatalf("%s v1=%v: official contracts must come first without duplicates", protocol, v1)
+			}
+			_, customName, _ := toolSchema(tools[len(officials)].(map[string]any), protocol)
+			if renames.Restore(customName) != "create_goal" {
+				t.Fatalf("client-only name did not round-trip: %q", customName)
+			}
+			if renames.Restore("read") != "READ" {
+				t.Fatal("official name did not restore the original client name")
+			}
+			arguments := `{"path":"fixture.txt"}`
+			if v1 {
+				arguments = `{"filePath":"fixture.txt"}`
+			}
+			converted, _ := renames.ToClientArguments("read", arguments)
+			if converted != `{"file_path":"fixture.txt"}` {
+				t.Fatalf("duplicate declaration changed the return adapter: %v", converted)
+			}
+		}
 	}
 }
 
@@ -284,8 +373,8 @@ func TestToolAdapterLegacyFunctions(t *testing.T) {
 		if _, exists := payload["functions"]; exists {
 			t.Fatal("legacy declarations retained")
 		}
-		if len(payload["tools"].([]any)) != 1 {
-			t.Fatal("legacy declarations duplicated")
+		if len(payload["tools"].([]any)) != len(officialToolNames(false)) {
+			t.Fatal("legacy declaration duplicated or official set incomplete")
 		}
 		if payload["function_call"].(map[string]any)["name"] != "edit" {
 			t.Fatal("legacy choice not renamed")
