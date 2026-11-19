@@ -21,3 +21,4 @@ test/
 # Local credentials, deployment backups, and verification artifacts
 .local/
 *.availability.json
+.DS_Store
