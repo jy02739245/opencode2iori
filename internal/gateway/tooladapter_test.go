@@ -67,6 +67,42 @@ func adapterTool(protocol wire.Protocol, name string, schema map[string]any) map
 	return map[string]any{"type": "function", "name": name, "description": description, "parameters": schema}
 }
 
+func TestClientToolDescriptionNBSP(t *testing.T) {
+	for _, protocol := range []wire.Protocol{wire.Chat, wire.Responses, wire.Anthropic} {
+		for _, v1 := range []bool{false, true} {
+			schema := map[string]any{"type": "object", "properties": map[string]any{
+				"value": map[string]any{"type": "string", "description": "Parameter keeps ordinary spaces"},
+			}}
+			originalSchema := cloneJSONMap(schema)
+			tool := adapterTool(protocol, "custom_probe", schema)
+			payload := map[string]any{"tools": []any{tool}}
+			renames, changed := renameAndCompleteTools(payload, protocol, v1, "darwin")
+			if !changed {
+				t.Fatal("client tool was not shaped")
+			}
+			tools := payload["tools"].([]any)
+			official := officialToolset(protocol, v1, "darwin")
+			if len(tools) != len(official)+1 || !reflect.DeepEqual(tools[:len(official)], official) {
+				t.Fatalf("%s v1=%v: official contracts changed", protocol, v1)
+			}
+			target := tool
+			if protocol == wire.Chat {
+				target = tool["function"].(map[string]any)
+			}
+			if got := target["description"]; got != "Client\u00a0tool\u00a0custom_probe" {
+				t.Fatalf("%s v1=%v: description = %q", protocol, v1, got)
+			}
+			if !reflect.DeepEqual(schema, originalSchema) {
+				t.Fatal("parameter schema or description was mutated")
+			}
+			wireName, ok := renames.Wire("custom_probe")
+			if !ok || renames.Restore(wireName) != "custom_probe" {
+				t.Fatal("client tool name was not restored")
+			}
+		}
+	}
+}
+
 func TestOfficialToolReturnsUseClientSchema(t *testing.T) {
 	cases := []struct {
 		name       string

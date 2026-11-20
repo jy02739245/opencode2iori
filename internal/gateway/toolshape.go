@@ -3,7 +3,6 @@ package gateway
 import (
 	_ "embed"
 	"encoding/json"
-	"runtime"
 	"strings"
 	"sync"
 
@@ -229,47 +228,42 @@ func hiddenOfficialTools(declaredNames []string, v1 bool) map[string]bool {
 	return hidden
 }
 
-// v2ShellDescription renders the configured platform's shell description,
-// retaining the host-based behavior when no platform override is supplied.
+// v2ShellDescription renders the client's supplied platform without inferring
+// its environment from the gateway host when the platform is unknown.
 func v2ShellDescription(base, platform string) string {
-	if platform == "" {
-		platform = runtime.GOOS
-		if platform != "windows" {
-			return base
-		}
-	}
 	switch platform {
 	case "win32", "windows":
 		return strings.Replace(base, "on Linux using bash", "on Windows using powershell", 1)
 	case "darwin":
 		return strings.Replace(base, "on Linux using bash", "on macOS using bash", 1)
-	default:
+	case "linux":
 		return base
+	default:
+		return strings.Replace(base, "on Linux using bash", "in the client's shell environment", 1)
 	}
 }
 
 // v1BashDescription applies the same platform rewrite to the 1.x bash
 // definition, which states its OS and shell inline.
 func v1BashDescription(base, platform string) string {
-	if platform == "" {
-		platform = runtime.GOOS
-		if platform != "windows" {
-			return base
-		}
-	}
 	switch platform {
 	case "win32", "windows":
+		base = strings.Replace(base, "Executes a given bash command", "Executes a given shell command", 1)
 		return strings.Replace(base, "OS: linux, Shell: bash", "OS: windows, Shell: powershell", 1)
 	case "darwin":
 		return strings.Replace(base, "OS: linux, Shell: bash", "OS: darwin, Shell: bash", 1)
-	default:
+	case "linux":
 		return base
+	default:
+		base = strings.Replace(base, "Executes a given bash command", "Executes a given shell command", 1)
+		return strings.Replace(base, "OS: linux, Shell: bash", "OS: unknown, Shell: unknown", 1)
 	}
 }
 
 // renameAndCompleteTools publishes official contracts first, discards same-name
-// client definitions, and appends renamed client-only tools. The mappings restore
-// client tool names and arguments in upstream responses.
+// client definitions, and appends renamed client-only tools with non-breaking
+// spaces in their descriptions. The mappings restore client tool names and
+// arguments in upstream responses.
 func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 bool, platform string) (*wire.ToolRenames, bool) {
 	switch protocol {
 	case wire.Chat, wire.Responses, wire.Anthropic:
@@ -335,6 +329,16 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 		_, capability, hasCapability := capabilityToolDefinition(entry, protocol, v1)
 		if wireName := clientWireName(renames, used, name); wireName != name {
 			setToolName(protocol, entry, wireName)
+		}
+		// The free tier also rejects literal wording in client descriptions.
+		// NBSP breaks that match without accumulating on repeated shaping.
+		// Keep parameter descriptions and the appended official tools intact.
+		descriptionTarget := entry
+		if protocol == wire.Chat {
+			descriptionTarget = jsonutil.MapAt(entry, "function")
+		}
+		if description, ok := descriptionTarget["description"].(string); ok {
+			descriptionTarget["description"] = strings.ReplaceAll(description, " ", "\u00a0")
 		}
 		shaped = append(shaped, entry)
 		if hasCapability {
