@@ -180,12 +180,53 @@ func officialTool(protocol wire.Protocol, name string, v1 bool, platform string)
 
 // officialToolset renders the full official set for a lane.
 func officialToolset(protocol wire.Protocol, v1 bool, platform string) []any {
+	return officialToolsetVisible(protocol, v1, platform, nil)
+}
+
+// officialToolsetVisible renders the official set without the tools a shaped
+// request must hide. A hidden tool is never published, bound or restored, so
+// the model cannot name a tool the client has no way to run.
+func officialToolsetVisible(protocol wire.Protocol, v1 bool, platform string, hidden map[string]bool) []any {
 	names := officialToolNames(v1)
 	tools := make([]any, 0, len(names))
 	for _, name := range names {
+		if hidden[name] {
+			continue
+		}
 		tools = append(tools, officialTool(protocol, name, v1, platform))
 	}
 	return tools
+}
+
+// hiddenOfficialTools returns the official tools a shaped request must not
+// publish. A client tool that runs shell commands (exec_command) covers file
+// operations through the shell, so the official file tools are dead ends for
+// that client: the model would pick them and the call could not run. They stay
+// visible when the client declares the matching tool, and the 1.x lane keeps
+// the full set because its gate was not probed.
+func hiddenOfficialTools(declaredNames []string, v1 bool) map[string]bool {
+	if v1 {
+		return nil
+	}
+	command := false
+	declared := make(map[string]bool, len(declaredNames))
+	for _, name := range declaredNames {
+		lower := strings.ToLower(name)
+		declared[lower] = true
+		if alias, ok := capabilityAliases[lower]; ok && alias.v2 == "shell" {
+			command = true
+		}
+	}
+	if !command {
+		return nil
+	}
+	hidden := map[string]bool{}
+	for _, name := range []string{"read", "write", "edit", "patch"} {
+		if !declared[name] {
+			hidden[name] = true
+		}
+	}
+	return hidden
 }
 
 // v2ShellDescription renders the configured platform's shell description,
@@ -267,7 +308,8 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			delete(payload, "functions")
 		}
 	}
-	shaped := officialToolset(protocol, v1, platform)
+	hidden := hiddenOfficialTools(declaredNames, v1)
+	shaped := officialToolsetVisible(protocol, v1, platform, hidden)
 	for _, item := range items {
 		entry, ok := item.(map[string]any)
 		if !ok {
@@ -287,13 +329,24 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			}
 			continue
 		}
+		// A client tool with an official counterpart keeps its own opaque alias
+		// and gains the official name as a second entry point, so the model may
+		// call either spelling and both reach the client tool.
+		_, capability, hasCapability := capabilityToolDefinition(entry, protocol, v1)
 		if wireName := clientWireName(renames, used, name); wireName != name {
 			setToolName(protocol, entry, wireName)
 		}
 		shaped = append(shaped, entry)
+		if hasCapability {
+			if _, bound := renames.Official(capability.official); !bound {
+				if renames.BindAlias(capability.official, name, capability.fields, capability.wireFields...) {
+					renames.BindClientSchema(capability.official, capability.clientSchema)
+				}
+			}
+		}
 	}
 	payload["tools"] = shaped
-	officialNames := officialToolNames(v1)
+	officialNames := visibleOfficialNames(v1, hidden)
 	bindOfficialToolAliases(renames, declaredNames, officialNames)
 	declared := make(map[string]string, len(declaredNames))
 	for _, name := range declaredNames {
@@ -301,8 +354,12 @@ func renameAndCompleteTools(payload map[string]any, protocol wire.Protocol, v1 b
 			declared[name] = wireName
 		}
 	}
-	sanitizeToolHistory(payload, protocol, declared, renames, officialToolNameSet(v1))
+	sanitizeToolHistory(payload, protocol, declared, renames, officialToolNameSetVisible(hidden, v1))
 	rewriteToolReferences(payload, protocol, renames)
+	// The official set is published next to the client's own tools, so a model
+	// can name a tool the client never declared. Such a call cannot be
+	// executed; the response path drops it instead of forwarding it.
+	renames.Enforce()
 	return renames, true
 }
 
@@ -327,11 +384,35 @@ func bindOfficialToolAliases(renames *wire.ToolRenames, declaredNames, officialN
 }
 
 func officialToolNameSet(v1 bool) map[string]bool {
+	return officialToolNameSetVisible(nil, v1)
+}
+
+// officialToolNameSetVisible returns the lane's published official names.
+func officialToolNameSetVisible(hidden map[string]bool, v1 bool) map[string]bool {
 	set := make(map[string]bool)
 	for _, name := range officialToolNames(v1) {
+		if hidden[name] {
+			continue
+		}
 		set[name] = true
 	}
 	return set
+}
+
+// visibleOfficialNames returns the lane's published official names in order.
+func visibleOfficialNames(v1 bool, hidden map[string]bool) []string {
+	names := officialToolNames(v1)
+	if len(hidden) == 0 {
+		return names
+	}
+	visible := make([]string, 0, len(names))
+	for _, name := range names {
+		if hidden[name] {
+			continue
+		}
+		visible = append(visible, name)
+	}
+	return visible
 }
 
 func sanitizeToolHistory(payload map[string]any, protocol wire.Protocol, declared map[string]string, renames *wire.ToolRenames, laneOfficial map[string]bool) {

@@ -526,7 +526,7 @@ func mayCarryToolName(body []byte) bool {
 // cannot contain a tool name; every rewrite is a map lookup after decoding.
 // Names that map to nothing are left alone.
 func RenameResponseTool(body []byte, protocol Protocol, renames *ToolRenames) []byte {
-	if renames.Empty() || len(body) == 0 {
+	if len(body) == 0 || (renames.Empty() && !renames.Enforcing()) {
 		return body
 	}
 	if !mayCarryToolName(body) {
@@ -538,7 +538,11 @@ func RenameResponseTool(body []byte, protocol Protocol, renames *ToolRenames) []
 	if !json.Valid(body) || decoder.Decode(&payload) != nil {
 		return body
 	}
-	if !renameToolInMap(payload, protocol, renames) {
+	changed := renameToolInMap(payload, protocol, renames)
+	if renames.Enforcing() && dropUnexecutableToolCalls(payload, protocol, renames) {
+		changed = true
+	}
+	if !changed {
 		return body
 	}
 	encoded, err := json.Marshal(payload)
@@ -546,6 +550,132 @@ func RenameResponseTool(body []byte, protocol Protocol, renames *ToolRenames) []
 		return body
 	}
 	return encoded
+}
+
+// dropUnexecutableToolCalls removes tool calls whose name maps to no declared
+// client tool from a decoded non-streaming response body, and reports whether
+// anything changed. A client cannot run such a call: forwarding it only makes
+// the client fail or retry the whole turn. A response left without tool calls
+// falls back to text so its terminal status stays truthful.
+func dropUnexecutableToolCalls(payload map[string]any, protocol Protocol, renames *ToolRenames) bool {
+	changed := false
+	switch protocol {
+	case Chat:
+		for _, rawChoice := range jsonutil.SliceAt(payload, "choices") {
+			choice, _ := rawChoice.(map[string]any)
+			choiceChanged := false
+			for _, key := range []string{"message", "delta"} {
+				container := jsonutil.MapAt(choice, key)
+				if container == nil {
+					continue
+				}
+				if calls, ok := container["tool_calls"].([]any); ok && len(calls) > 0 {
+					kept := make([]any, 0, len(calls))
+					for _, rawCall := range calls {
+						call, _ := rawCall.(map[string]any)
+						function, _ := call["function"].(map[string]any)
+						if function != nil && !renames.Keep(jsonutil.StringAt(function, "name")) {
+							choiceChanged = true
+							continue
+						}
+						kept = append(kept, rawCall)
+					}
+					if choiceChanged {
+						if len(kept) == 0 {
+							delete(container, "tool_calls")
+						} else {
+							container["tool_calls"] = kept
+						}
+					}
+				}
+				if function, ok := container["function_call"].(map[string]any); ok && !renames.Keep(jsonutil.StringAt(function, "name")) {
+					delete(container, "function_call")
+					choiceChanged = true
+				}
+			}
+			if choiceChanged {
+				downgradeChatFinish(choice)
+				changed = true
+			}
+		}
+	case Responses:
+		drop := func(items []any) ([]any, bool) {
+			kept := make([]any, 0, len(items))
+			dropped := false
+			for _, rawItem := range items {
+				item, _ := rawItem.(map[string]any)
+				switch jsonutil.StringAt(item, "type") {
+				case "function_call", "custom_tool_call":
+					if !renames.Keep(jsonutil.StringAt(item, "name")) {
+						dropped = true
+						continue
+					}
+				}
+				kept = append(kept, rawItem)
+			}
+			return kept, dropped
+		}
+		if output, ok := payload["output"].([]any); ok {
+			if kept, dropped := drop(output); dropped {
+				payload["output"] = kept
+				changed = true
+			}
+		}
+		if resp, ok := payload["response"].(map[string]any); ok {
+			if output, ok := resp["output"].([]any); ok {
+				if kept, dropped := drop(output); dropped {
+					resp["output"] = kept
+					changed = true
+				}
+			}
+		}
+	case Anthropic:
+		drop := func(blocks []any) ([]any, bool) {
+			kept := make([]any, 0, len(blocks))
+			dropped := false
+			for _, rawBlock := range blocks {
+				block, _ := rawBlock.(map[string]any)
+				if jsonutil.StringAt(block, "type") == "tool_use" && !renames.Keep(jsonutil.StringAt(block, "name")) {
+					dropped = true
+					continue
+				}
+				kept = append(kept, rawBlock)
+			}
+			return kept, dropped
+		}
+		if content, ok := payload["content"].([]any); ok {
+			if kept, dropped := drop(content); dropped {
+				payload["content"] = kept
+				if stopReason, _ := payload["stop_reason"].(string); stopReason == "tool_use" {
+					payload["stop_reason"] = "end_turn"
+				}
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// downgradeChatFinish turns a tool-call finish reason into a text one once no
+// call survives: an empty tool_calls list is a bug for every client, not an
+// answer.
+func downgradeChatFinish(choice map[string]any) {
+	container := jsonutil.MapAt(choice, "message")
+	if container == nil {
+		container = jsonutil.MapAt(choice, "delta")
+	}
+	if container != nil {
+		if calls, ok := container["tool_calls"].([]any); ok && len(calls) > 0 {
+			return
+		}
+		if _, ok := container["function_call"]; ok {
+			return
+		}
+	}
+	switch finishReason, _ := choice["finish_reason"].(string); finishReason {
+	case "tool_calls", "function_call":
+		choice["finish_reason"] = "stop"
+	}
 }
 
 // renameToolInMap rewrites aliased tool names in a decoded response or stream

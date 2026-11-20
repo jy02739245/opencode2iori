@@ -408,3 +408,126 @@ func TestToolAdapterAllowedTools(t *testing.T) {
 		}
 	}
 }
+
+func TestCapabilityAliasBindsExecCommand(t *testing.T) {
+	schema := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"cmd":               map[string]any{"type": "string"},
+			"workdir":           map[string]any{"type": "string"},
+			"yield_time_ms":     map[string]any{"type": "number"},
+			"max_output_tokens": map[string]any{"type": "number"},
+		},
+		"required": []any{"cmd"},
+	}
+	for _, v1 := range []bool{false, true} {
+		official := "shell"
+		if v1 {
+			official = "bash"
+		}
+		for _, protocol := range []wire.Protocol{wire.Chat, wire.Responses, wire.Anthropic} {
+			payload := map[string]any{"tools": []any{adapterTool(protocol, "exec_command", schema)}}
+			renames, changed := renameAndCompleteTools(payload, protocol, v1, "darwin")
+			if !changed {
+				t.Fatalf("%s v1=%v: request was not shaped", protocol, v1)
+			}
+			hidden := hiddenOfficialTools([]string{"exec_command"}, v1)
+			visible := visibleOfficialNames(v1, hidden)
+			tools := payload["tools"].([]any)
+			if len(tools) != len(visible)+1 {
+				t.Fatalf("%s v1=%v: got %d declarations, want %d official plus the client alias", protocol, v1, len(tools), len(visible))
+			}
+			for index, name := range visible {
+				if !reflect.DeepEqual(tools[index], officialTool(protocol, name, v1, "darwin")) {
+					t.Fatalf("%s v1=%v: official %q declaration drifted", protocol, v1, name)
+				}
+			}
+			if !v1 {
+				for _, name := range []string{"read", "write", "edit", "patch"} {
+					if !hidden[name] {
+						t.Fatalf("%s: official %q must be hidden for a command client", protocol, name)
+					}
+				}
+			}
+			alias, ok := renames.Wire("exec_command")
+			if !ok || alias == official || alias == "exec_command" {
+				t.Fatalf("%s v1=%v: client tool wire name = %q, %v; want an opaque alias", protocol, v1, alias, ok)
+			}
+			if restored := renames.Restore(alias); restored != "exec_command" {
+				t.Fatalf("%s v1=%v: alias did not restore: %q", protocol, v1, restored)
+			}
+			if !renames.Keep(official) {
+				t.Fatalf("%s v1=%v: official %q must stay executable", protocol, v1, official)
+			}
+			if clientName, _ := renames.Official(official); clientName != "exec_command" {
+				t.Fatalf("%s v1=%v: official name bound to %q, want exec_command", protocol, v1, clientName)
+			}
+			if client, _ := renames.Resolve(official); client != "exec_command" {
+				t.Fatalf("%s v1=%v: official name restored to %q, want exec_command", protocol, v1, client)
+			}
+			// The official spelling carries the official argument names.
+			converted, adapted := renames.ToClientArguments(official, map[string]any{
+				"command": "ls", "workdir": "/tmp", "timeout": 1000, "background": true,
+			})
+			if !adapted {
+				t.Fatalf("%s v1=%v: official arguments were not adapted", protocol, v1)
+			}
+			want := map[string]any{"cmd": "ls", "workdir": "/tmp"}
+			if !reflect.DeepEqual(converted, want) {
+				t.Fatalf("%s v1=%v: arguments = %#v, want %#v", protocol, v1, converted, want)
+			}
+			// The client's own alias keeps the client's own arguments.
+			if converted, adapted := renames.ToClientArguments(alias, map[string]any{"cmd": "ls", "workdir": "/tmp"}); adapted {
+				t.Fatalf("%s v1=%v: client alias arguments were rewritten to %#v", protocol, v1, converted)
+			}
+			// History replays under the client alias with the client's arguments.
+			wireArgs, changedArgs := renames.ToWireArguments("exec_command", map[string]any{"cmd": "pwd", "workdir": "/tmp"})
+			if changedArgs || !reflect.DeepEqual(wireArgs, map[string]any{"cmd": "pwd", "workdir": "/tmp"}) {
+				t.Fatalf("%s v1=%v: history arguments = %#v, changed=%v", protocol, v1, wireArgs, changedArgs)
+			}
+		}
+	}
+}
+
+func TestUnexecutableOfficialCallIsDropped(t *testing.T) {
+	payload := map[string]any{"tools": []any{adapterTool(wire.Chat, "exec_command", map[string]any{
+		"type": "object", "additionalProperties": false,
+		"properties": map[string]any{"cmd": map[string]any{"type": "string"}}, "required": []any{"cmd"},
+	})}}
+	renames, _ := renameAndCompleteTools(payload, wire.Chat, false, "darwin")
+	if !renames.Enforcing() {
+		t.Fatal("shaped request must enforce the client tool vocabulary")
+	}
+	if renames.Keep("read") || renames.Keep("write") || renames.Keep("patch") {
+		t.Fatal("an official tool the client cannot execute must not be kept")
+	}
+	if !renames.Keep("shell") {
+		t.Fatal("the bound official shell must stay executable")
+	}
+}
+
+func TestHiddenOfficialTools(t *testing.T) {
+	hidden := hiddenOfficialTools([]string{"exec_command"}, false)
+	for _, name := range []string{"read", "write", "edit", "patch"} {
+		if !hidden[name] {
+			t.Fatalf("official %q must be hidden for a command-only client", name)
+		}
+	}
+	if hidden["shell"] || hidden["glob"] || hidden["grep"] {
+		t.Fatalf("shell and search tools must stay published: %#v", hidden)
+	}
+	hidden = hiddenOfficialTools([]string{"exec_command", "Read"}, false)
+	if hidden["read"] {
+		t.Fatal("an official tool the client declares must stay published")
+	}
+	if !hidden["edit"] {
+		t.Fatal("undeclared file tools must stay hidden")
+	}
+	if hiddenOfficialTools([]string{"Read", "Edit", "Write"}, false) != nil {
+		t.Fatal("a client without a command tool keeps the full official set")
+	}
+	if hiddenOfficialTools([]string{"exec_command"}, true) != nil {
+		t.Fatal("the 1.x lane keeps the full official set")
+	}
+}

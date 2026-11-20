@@ -238,7 +238,7 @@ func ForwardStream(ctx context.Context, w http.ResponseWriter, reader io.Reader,
 // that disconnects mid-stream cannot strand a blocked writer. Fragmented
 // argument objects are buffered only for tools with a registered adapter.
 func RenameStreamReader(reader io.Reader, protocol Protocol, renames *ToolRenames) io.Reader {
-	if renames.Empty() {
+	if renames.Empty() && !renames.Enforcing() {
 		return reader
 	}
 	return &renameStreamReader{
@@ -351,6 +351,11 @@ func (reader *renameStreamReader) rewriteLine(line string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if rewritten == nil {
+		// The frame belonged to a tool call the client cannot execute; it is
+		// dropped whole so the client never sees an unknown tool name.
+		return nil, nil
+	}
 	if string(rewritten) == raw {
 		return []byte(line), nil
 	}
@@ -367,6 +372,7 @@ func (reader *renameStreamReader) rewriteLine(line string) ([]byte, error) {
 type streamToolRenameState struct {
 	decided          bool
 	renamed          bool
+	dropped          bool
 	pending          string
 	pendingArguments strings.Builder
 	adapted          *streamArgumentBuffer
@@ -385,6 +391,17 @@ type streamToolRenamer struct {
 	order         []string
 	arguments     map[string]*streamArgumentBuffer
 	argumentBytes int
+	// dropFrame asks the reader to emit no bytes for the frame just rewritten.
+	dropFrame bool
+	// droppedItems and keptItems track Responses items and Anthropic content
+	// blocks by their stream key, so argument events that carry no name follow
+	// the keep/drop decision made when the item opened.
+	droppedItems map[string]bool
+	keptItems    map[string]bool
+	// keptChoices and droppedChoices decide whether a Chat choice that only
+	// produced dropped calls still finishes as a tool call.
+	keptChoices    map[string]bool
+	droppedChoices map[string]bool
 }
 
 // rewriteFrame rewrites one SSE data payload, which is raw JSON text. Frames
@@ -392,8 +409,9 @@ type streamToolRenamer struct {
 // mentions a client alias (Anthropic and Responses) or "tool_calls" (Chat) is
 // decoded.
 func (renamer *streamToolRenamer) rewriteFrame(eventName, raw string) ([]byte, error) {
+	renamer.dropFrame = false
 	if renamer.protocol != Chat {
-		if renamer.renames.HasAdapters() && (renamer.protocol == Responses || renamer.protocol == Anthropic) {
+		if renamer.renames.HasAdapters() || renamer.renames.Enforcing() {
 			return renamer.rewriteArgumentFrame(eventName, raw)
 		}
 		// Anthropic and Responses streams always carry a complete tool name in
@@ -434,29 +452,50 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) ([]byte, error) {
 		finishReason, hasFinishReason := choice["finish_reason"].(string)
 		finished := hasFinishReason && finishReason != ""
 		seen := map[string]bool{}
+		choiceKey := fmt.Sprint(choiceIndex)
 		for _, container := range []string{"delta", "message"} {
 			message, _ := choice[container].(map[string]any)
 			if message == nil {
 				continue
 			}
-			for callIndex, rawCall := range jsonutil.SliceAt(message, "tool_calls") {
-				call, _ := rawCall.(map[string]any)
-				function, _ := call["function"].(map[string]any)
-				if function == nil {
-					continue
+			if calls := jsonutil.SliceAt(message, "tool_calls"); len(calls) > 0 {
+				kept := make([]any, 0, len(calls))
+				for callIndex, rawCall := range calls {
+					call, _ := rawCall.(map[string]any)
+					function, _ := call["function"].(map[string]any)
+					if function == nil {
+						kept = append(kept, rawCall)
+						continue
+					}
+					// Tool indices restart at zero in each choice. Keeping the choice
+					// in the key prevents one completion from consuming another's name.
+					key := fmt.Sprint(choiceIndex) + "\x00" + fmt.Sprint(jsonutil.FirstAny(call["index"], jsonutil.StringAt(call, "id"), callIndex))
+					state := renamer.toolState(key)
+					state.callIndex = jsonutil.FirstAny(call["index"], callIndex)
+					state.choiceIndex = choiceIndex
+					seen[key] = true
+					rewritten, err := renamer.rewriteChatTool(state, function, finished)
+					if err != nil {
+						return nil, err
+					}
+					if state.dropped {
+						renamer.noteDroppedChoice(choiceKey)
+						changed = true
+						continue
+					}
+					if state.decided {
+						// A call whose name is still held back is not counted
+						// as kept until it resolves.
+						renamer.noteKeptChoice(choiceKey)
+					}
+					kept = append(kept, rawCall)
+					changed = rewritten || changed
 				}
-				// Tool indices restart at zero in each choice. Keeping the choice
-				// in the key prevents one completion from consuming another's name.
-				key := fmt.Sprint(choiceIndex) + "\x00" + fmt.Sprint(jsonutil.FirstAny(call["index"], jsonutil.StringAt(call, "id"), callIndex))
-				state := renamer.toolState(key)
-				state.callIndex = jsonutil.FirstAny(call["index"], callIndex)
-				state.choiceIndex = choiceIndex
-				seen[key] = true
-				rewritten, err := renamer.rewriteChatTool(state, function, finished)
-				if err != nil {
-					return nil, err
+				if len(kept) == 0 {
+					delete(message, "tool_calls")
+				} else {
+					message["tool_calls"] = kept
 				}
-				changed = rewritten || changed
 			}
 			if function := jsonutil.MapAt(message, "function_call"); function != nil {
 				key := fmt.Sprint(choiceIndex) + "\x01legacy"
@@ -467,6 +506,15 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) ([]byte, error) {
 				rewritten, err := renamer.rewriteChatTool(state, function, finished)
 				if err != nil {
 					return nil, err
+				}
+				if state.dropped {
+					delete(message, "function_call")
+					renamer.noteDroppedChoice(choiceKey)
+					changed = true
+					continue
+				}
+				if state.decided {
+					renamer.noteKeptChoice(choiceKey)
 				}
 				changed = rewritten || changed
 			}
@@ -490,7 +538,20 @@ func (renamer *streamToolRenamer) rewriteChatFrame(raw string) ([]byte, error) {
 					choice["delta"] = delta
 				}
 				renamer.appendPendingCall(state, delta)
+				if state.dropped {
+					renamer.noteDroppedChoice(choiceKey)
+				} else {
+					renamer.noteKeptChoice(choiceKey)
+				}
 				changed = true
+			}
+			// A choice whose only calls were dropped must not finish as a tool
+			// call: the client would wait for a call it never received.
+			if renamer.droppedChoices[choiceKey] && !renamer.keptChoices[choiceKey] {
+				if finishReason == "tool_calls" || finishReason == "function_call" {
+					choice["finish_reason"] = "stop"
+					changed = true
+				}
 			}
 		}
 	}
@@ -557,6 +618,15 @@ func (renamer *streamToolRenamer) releasePendingArguments(state *streamToolRenam
 // ambiguous: the held-back name and arguments are emitted verbatim.
 func (renamer *streamToolRenamer) finishState(state *streamToolRenameState, function map[string]any) bool {
 	changed := false
+	if state.pending != "" && !renamer.renames.Keep(state.pending) {
+		// The held-back name never resolved to a declared client tool, so the
+		// call cannot run; drop it instead of emitting a name the client would
+		// reject.
+		state.dropped, state.decided, state.renamed = true, true, false
+		state.pending = ""
+		state.pendingArguments.Reset()
+		return true
+	}
 	if state.pending != "" {
 		function["name"] = state.pending
 		changed = true
@@ -576,6 +646,9 @@ func (state *streamToolRenameState) hasPendingCall() bool {
 func (renamer *streamToolRenamer) appendPendingCall(state *streamToolRenameState, delta map[string]any) {
 	function := map[string]any{}
 	renamer.finishState(state, function)
+	if state.dropped {
+		return
+	}
 	if state.legacy {
 		delta["function_call"] = function
 		return
@@ -640,7 +713,7 @@ func (renamer *streamToolRenamer) finish() []byte {
 // because it belongs to a longer name the client never declared.
 func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState, function map[string]any, fragment string) bool {
 	if state.decided {
-		if !state.renamed {
+		if state.dropped || !state.renamed {
 			return false
 		}
 		// A resolved alias accepts no further fragments: any continuation
@@ -667,9 +740,31 @@ func (renamer *streamToolRenamer) applyNameFragment(state *streamToolRenameState
 	// one declared client tool only in case or separators; a name nothing
 	// declared is written out as the model sent it.
 	client, renamed := renamer.renames.Resolve(state.pending)
+	if !renamer.renames.Keep(client) {
+		state.dropped, state.decided, state.renamed = true, true, false
+		delete(function, "name")
+		return true
+	}
 	function["name"] = client
 	state.decided, state.renamed = true, renamed
 	return true
+}
+
+// noteKeptChoice records that a choice produced at least one call the client
+// can execute, so its tool-call finish reason stays truthful.
+func (renamer *streamToolRenamer) noteKeptChoice(key string) {
+	if renamer.keptChoices == nil {
+		renamer.keptChoices = map[string]bool{}
+	}
+	renamer.keptChoices[key] = true
+}
+
+// noteDroppedChoice records that a choice lost at least one call.
+func (renamer *streamToolRenamer) noteDroppedChoice(key string) {
+	if renamer.droppedChoices == nil {
+		renamer.droppedChoices = map[string]bool{}
+	}
+	renamer.droppedChoices[key] = true
 }
 
 // toolState returns the rename state for a tool key, creating it on first

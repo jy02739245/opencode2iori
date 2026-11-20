@@ -41,6 +41,11 @@ type ToolRenames struct {
 	byCase   map[string]string
 	byShape  map[string]string
 	adapters map[string]toolArgumentAdapter
+	// enforce marks the rename set as the client's whole vocabulary: a tool
+	// call that maps to no declared client tool cannot be executed and is
+	// dropped from the response instead of being forwarded under a name the
+	// client never declared.
+	enforce bool
 }
 
 // NewToolRenames returns an empty rename set.
@@ -247,6 +252,54 @@ func (r *ToolRenames) Resolve(wire string) (string, bool) {
 func (r *ToolRenames) Restore(wire string) string {
 	client, _ := r.Resolve(wire)
 	return client
+}
+
+// Enforce marks this rename set as the client's whole tool vocabulary. A
+// shaped request publishes the official tool set next to the client's own
+// tools, so a model can call an official name the client never declared; such
+// a call cannot be executed and must be dropped from the response rather than
+// forwarded and rejected by the client.
+func (r *ToolRenames) Enforce() {
+	if r != nil {
+		r.enforce = true
+	}
+}
+
+// Enforcing reports whether unexecutable tool calls must be dropped.
+func (r *ToolRenames) Enforcing() bool {
+	return r != nil && r.enforce
+}
+
+// Keep reports whether a tool name the upstream reported can be executed by
+// the client: an exact wire alias, an official name bound to a declared client
+// tool, a declared client name, or a spelling that folds onto exactly one
+// declared client tool. Without enforcement every name is kept, which preserves
+// the pass-through behavior for unshaped requests.
+func (r *ToolRenames) Keep(name string) bool {
+	if r == nil || !r.enforce || name == "" {
+		return true
+	}
+	if _, ok := r.Client(name); ok {
+		return true
+	}
+	if _, ok := r.Official(name); ok {
+		return true
+	}
+	if _, declared := r.toWire[name]; declared {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(name, ClientToolPrefix); ok && rest != "" {
+		if _, declared := r.toWire[rest]; declared {
+			return true
+		}
+	}
+	if match, ok := r.byCase[strings.ToLower(name)]; ok && match != "" {
+		return true
+	}
+	if match, ok := r.byShape[foldToolName(name)]; ok && match != "" {
+		return true
+	}
+	return false
 }
 
 // ClientToolWireName builds the wire name for one client tool. The name is

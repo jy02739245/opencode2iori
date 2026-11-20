@@ -51,6 +51,47 @@ func (r *ToolRenames) BindAdapter(client, wire string, fields map[string]string,
 	return true
 }
 
+// BindAlias adds an official tool name as a second entry point for a client
+// tool that keeps its own opaque wire alias. Unlike BindAdapter it does not
+// replace the client's wire name: the client definition stays published under
+// its alias, and the official name maps to the same client tool with the
+// official contract's argument names. It reports false when either name is
+// already bound to something else.
+func (r *ToolRenames) BindAlias(official, client string, fields map[string]string, wireFields ...string) bool {
+	if r == nil || official == "" || client == "" {
+		return false
+	}
+	if existing, ok := r.Official(official); ok && existing != client {
+		return false
+	}
+	if existing, ok := r.Client(official); ok && existing != client {
+		return false
+	}
+	adapter := toolArgumentAdapter{toClient: map[string]string{}, toWire: map[string]string{}}
+	for source, target := range fields {
+		if source == "" || target == "" {
+			return false
+		}
+		if previous, exists := adapter.toWire[target]; exists && previous != source {
+			return false
+		}
+		adapter.toClient[source] = target
+		adapter.toWire[target] = source
+	}
+	if len(wireFields) > 0 {
+		adapter.wireFields = make(map[string]bool, len(wireFields))
+		for _, field := range wireFields {
+			adapter.wireFields[field] = true
+		}
+	}
+	r.BindOfficial(official, client)
+	if r.adapters == nil {
+		r.adapters = map[string]toolArgumentAdapter{}
+	}
+	r.adapters[official] = adapter
+	return true
+}
+
 // BindClientSchema retains closed client properties for returned arguments only.
 // Schemas allowing additional properties keep those values, as JSON Schema requires.
 func (r *ToolRenames) BindClientSchema(wire string, schema map[string]any) {
